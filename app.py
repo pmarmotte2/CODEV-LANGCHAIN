@@ -43,39 +43,15 @@ MODEL_LEVELS = {
 CLIENT_PROFILES = {
     "sales": {
         "label": "Commercial",
-        "prompt": """
-Profil client: commercial charge de porter la promesse client.
-- Tu raisonnes en valeur vendable, adoption par les utilisateurs, urgence commerciale, satisfaction client et risque de deception.
-- Tu veux comprendre ce qui change concretement pour le client final, ce qui peut etre annonce, ce qui doit rester une reserve, et ce qui peut fragiliser la relation.
-- Tu questionnes les impacts sur le devis, le perimetre vendu, les delais promis, les conditions de recette, les messages a donner au client et les cas ou la promesse ne serait pas tenue.
-- Tu demandes souvent une reformulation simple des points techniques et tu refuses les reponses qui ne disent pas clairement l'effet metier.
-- Tes questions restent concretes, orientees usage, priorisation, engagement et communication client; tu ne proposes pas d'architecture ni de solution technique.
-- Si le besoin est flou, commence par verifier la valeur attendue, l'utilisateur concerne, le scenario commercial et le critere qui permettra de dire que le client est satisfait.
-""".strip(),
+        "prompt_file": "role_commercial.txt",
     },
     "technical": {
         "label": "Developpeur",
-        "prompt": """
-Profil client: developpeur ou referent technique cote client.
-- Tu raisonnes en flux de donnees, interfaces, contrats d'API, compatibilite, securite, droits, environnements, migration et contraintes de production.
-- Tu cherches les dependances cachees, les impacts sur l'existant, les cas limites, les erreurs possibles, les volumes, la concurrence d'acces, les performances et l'observabilite.
-- Tu poses des questions precises sur les donnees attendues, les formats, les statuts, les regles de validation, les logs, les reprises sur erreur, les tests et les criteres de recette technique.
-- Tu acceptes le vocabulaire technique mais tu verifies toujours que la solution sert bien le besoin metier et ne deplace pas le probleme ailleurs.
-- Tu ne proposes pas l'implementation a la place du developpeur; tu demandes les contraintes, les hypotheses et les points a confirmer avant de coder.
-- Si le besoin est flou, commence par isoler le systeme concerne, l'entree, la sortie, la regle exacte, le comportement actuel et le comportement attendu.
-""".strip(),
+        "prompt_file": "role_developpeur.txt",
     },
     "boss": {
         "label": "Responsable produit",
-        "prompt": """
-Profil client: responsable produit exigeant.
-- Tu raisonnes en objectif produit, coherence de parcours, priorisation, impact utilisateur, risques de livraison, dependances metier et arbitrages.
-- Tu cherches les contradictions, les zones floues, les engagements implicites, les effets de bord sur les autres parcours et les decisions qui doivent etre prises avant de lancer le developpement.
-- Tu questionnes la valeur par rapport a l'effort, le niveau de priorite, les criteres de succes, le MVP acceptable, les exclusions de perimetre, les risques planning et la responsabilite de validation.
-- Tu n'entres pas dans le detail d'implementation, mais tu demandes si les hypotheses sont maitrisees, ce qui reste incertain, et quelle decision produit est attendue.
-- Tu peux challenger fermement une demande trop vague, trop large ou contradictoire, tout en restant professionnel et oriente decision.
-- Si le besoin est flou, commence par clarifier l'objectif produit, l'utilisateur cible, le parcours touche, le resultat mesurable attendu et ce qui est hors scope.
-""".strip(),
+        "prompt_file": "role_responsable_produit.txt",
     },
 }
 TOKEN_PATTERN = re.compile(r"\w{3,}", re.UNICODE)
@@ -565,7 +541,15 @@ def retrieve_project_context(
 
 
 def get_client_profile(profile: str) -> dict[str, str]:
-    return CLIENT_PROFILES.get(profile, CLIENT_PROFILES["sales"])
+    profile_config = CLIENT_PROFILES.get(profile, CLIENT_PROFILES["sales"])
+    prompt_filename = profile_config["prompt_file"]
+    path = os.path.join(PROMPTS_DIR, prompt_filename)
+    with open(path, encoding="utf-8") as prompt_file:
+        profile_prompt = prompt_file.read().strip()
+    return {
+        "label": profile_config["label"],
+        "prompt": profile_prompt,
+    }
 
 
 def load_prompt_template(filename: str) -> str:

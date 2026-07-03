@@ -54,6 +54,9 @@ Une fois le rapport genere, le bouton `Ameliorer le rapport` analyse les axes fa
 Les prompts sont disponibles dans le dossier `prompts/` pour faciliter la revue ou leur modification:
 
 - `prompts/client_questions.txt`: questions posees par le profil client selectionne.
+- `prompts/role_commercial.txt`: posture du profil commercial.
+- `prompts/role_developpeur.txt`: posture du profil technique/developpeur.
+- `prompts/role_responsable_produit.txt`: posture du profil responsable produit.
 - `prompts/opening_question.txt`: consigne utilisee pour demarrer la discussion.
 - `prompts/answer_help.txt`: aide au developpeur pour preparer sa reponse.
 - `prompts/framing_report.txt`: generation du rapport et du score de maturite.
