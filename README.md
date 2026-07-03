@@ -5,6 +5,14 @@ CODEV simule un atelier de cadrage avec plusieurs profils client, detecte les zo
 
 L'objectif n'est pas de remplacer le chef de projet ou le developpeur, mais de faire ressortir plus tot les ambiguites qui generent souvent des bugs, des retours client ou des changements de perimetre.
 
+## Demonstration
+
+<video src="demo/demo.mp4" controls width="100%">
+  Votre navigateur ne supporte pas la lecture video.
+</video>
+
+Si la video ne s'affiche pas dans le rendu Markdown, ouvrir directement `demo/demo.mp4`.
+
 Le profil de l'interlocuteur client est selectionnable avant le demarrage:
 
 - Commercial
