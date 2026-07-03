@@ -7,11 +7,11 @@ L'objectif n'est pas de remplacer le chef de projet ou le developpeur, mais de f
 
 ## Demonstration
 
-<p align="center" width="100%">
-<video src="https://github.com/pmarmotte2/CODEV/blob/main/demo/demo.mp4" width="80%" controls></video>
-</p>
+[<img src="https://img.youtube.com/vi/lZ-jVU_h800/hqdefault.jpg" width="600" height="300"
+/>](https://www.youtube.com/embed/lZ-jVU_h800)
 
-Si la video ne s'affiche pas dans le rendu Markdown, ouvrir directement `demo/demo.mp4`.
+
+
 
 Le profil de l'interlocuteur client est selectionnable avant le demarrage:
 
