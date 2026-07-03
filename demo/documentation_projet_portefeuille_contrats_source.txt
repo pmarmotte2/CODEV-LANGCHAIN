@@ -1,0 +1,98 @@
+Documentation projet existante - Portefeuille contrats
+======================================================
+
+Contexte general
+----------------
+
+L'application CRM interne permet aux equipes commerciales de suivre les contrats clients et les renouvellements a venir.
+L'ecran "Portefeuille contrats" est principalement utilise par les commerciaux pour preparer leurs relances.
+
+La liste affiche les contrats rattaches au portefeuille de l'utilisateur connecte.
+Certains responsables commerciaux disposent egalement d'une vision plus large sur plusieurs portefeuilles.
+
+
+Notion d'alerte
+---------------
+
+L'application affiche un indicateur d'alerte sur certains contrats.
+Les niveaux actuellement visibles dans l'interface sont vert, orange et rouge.
+
+L'alerte rouge correspond en general a un contrat considere prioritaire ou risque.
+Les regles exactes de passage en rouge sont gerees par un traitement existant et ne sont pas detaillees dans cette documentation.
+
+Exemples de situations souvent associees a une alerte rouge :
+
+- contrat proche de sa date de fin ;
+- absence d'action commerciale recente ;
+- retour client negatif ;
+- renouvellement incertain ;
+- blocage interne signale par un manager.
+
+
+Ecran Portefeuille contrats
+---------------------------
+
+L'ecran contient actuellement :
+
+- un tableau de contrats ;
+- des filtres par commercial, region, statut et niveau d'alerte ;
+- une fiche detail consultable depuis une ligne ;
+- un champ de recherche client ;
+- un tri sur certaines colonnes.
+
+Les colonnes visibles peuvent varier selon le profil utilisateur et selon les preferences sauvegardees.
+Les colonnes les plus frequentes sont : client, numero de contrat, statut, date de fin, commercial, montant, niveau d'alerte.
+
+
+Profils utilisateurs
+--------------------
+
+Les profils principaux sont :
+
+- commercial ;
+- responsable commercial ;
+- administrateur ;
+- support.
+
+Les droits precis ne sont pas rappeles dans cette documentation.
+Le support a acces a certains ecrans pour diagnostic, mais ne realise normalement pas d'actions commerciales.
+
+
+Exports existants
+-----------------
+
+L'application possede deja quelques exports CSV sur d'autres ecrans.
+Il n'existe pas aujourd'hui d'export dedie aux contrats rouges dans l'ecran Portefeuille contrats.
+
+Les exports existants ne sont pas harmonises :
+
+- certains exports reprennent les filtres courants ;
+- certains exports reprennent toutes les donnees disponibles ;
+- certains exports sont limites a 1 000 lignes ;
+- les noms de fichiers ne suivent pas toujours le meme format.
+
+
+Contraintes connues
+-------------------
+
+Les commerciaux demandent regulierement un fichier exploitable dans Excel.
+Les volumes sont variables selon les regions.
+La periode avant campagne de renouvellement genere davantage de consultations.
+
+Le projet devra eviter de degrader les performances de l'ecran.
+Les donnees commerciales sensibles doivent etre manipulees avec prudence.
+
+
+Informations manquantes dans cette documentation
+------------------------------------------------
+
+Cette documentation ne precise pas :
+
+- la liste definitive des champs a exporter ;
+- les profils autorises a exporter ;
+- le comportement attendu si aucun contrat rouge n'est trouve ;
+- les limites de volume ;
+- le format exact attendu ;
+- les regles de journalisation ;
+- les criteres d'acceptation de la recette ;
+- le traitement des donnees sensibles dans le fichier exporte.

@@ -1,0 +1,36 @@
+Demande client a saisir dans CODEV
+===================================
+
+Nous souhaitons ajouter dans l'ecran "Portefeuille contrats" un bouton permettant d'exporter vers Excel la liste des contrats en alerte rouge afin que les commerciaux puissent preparer leurs actions de renouvellement.
+
+L'export devra etre accessible depuis la liste des contrats et reprendre les informations utiles a l'analyse commerciale.
+
+Nous aimerions disposer de cette fonctionnalite rapidement, idealement pour la prochaine campagne de renouvellement.
+
+
+Scenario conseille pour la demonstration
+========================================
+
+1. Coller le texte ci-dessus dans le champ "Evolution ou correction".
+2. Selectionner l'interlocuteur "Commercial" ou "Responsable".
+3. Joindre le PDF `demo/documentation_projet_portefeuille_contrats_entree.pdf` comme documentation projet.
+4. Demarrer la discussion.
+5. Repondre volontairement de maniere incomplete aux premieres questions.
+6. Generer un premier rapport.
+7. Continuer la discussion avec les clarifications proposees.
+8. Regenerer le rapport pour montrer l'amelioration du score.
+
+
+Questions utiles a poser ou a faire emerger
+===========================================
+
+- Qui est autorise a exporter les contrats en alerte rouge ?
+- Les commerciaux peuvent-ils exporter uniquement leur portefeuille ou tous les contrats ?
+- Quels champs exacts doivent apparaitre dans le fichier Excel ?
+- Le montant du contrat, la marge et les remises negociees doivent-ils etre visibles ?
+- Quel volume maximal de contrats doit etre supporte dans un export ?
+- Faut-il journaliser chaque export pour audit ?
+- Le fichier exporte doit-il contenir des donnees personnelles ?
+- Les contrats resilies, suspendus ou deja renouveles doivent-ils etre exclus ?
+- Quel format de nommage du fichier est attendu ?
+- Quels criteres d'acceptation permettront de valider la fonctionnalite en recette ?

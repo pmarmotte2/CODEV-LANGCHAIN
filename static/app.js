@@ -34,10 +34,12 @@ let documentSessionId = "";
 let documentSessionSignature = "";
 let recognition = null;
 let isListening = false;
+let isRecognitionActive = false;
 let transcriptBase = "";
 let finalTranscript = "";
 let latestInterimTranscript = "";
 let isControlRecording = false;
+let recognitionMode = "manual";
 let currentAudio = null;
 let currentAudioUrl = "";
 const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
@@ -666,7 +668,11 @@ function setListening(nextIsListening) {
   isListening = nextIsListening;
   microphoneButton.classList.toggle("is-listening", isListening);
   microphoneButton.setAttribute("aria-pressed", String(isListening));
-  microphoneButton.textContent = isListening ? "Relacher Ctrl" : "Micro Ctrl";
+  if (!isListening) {
+    microphoneButton.textContent = "Micro Ctrl";
+    return;
+  }
+  microphoneButton.textContent = recognitionMode === "control" ? "Relacher Ctrl" : "Arreter le micro";
 }
 
 function renderTranscript(interimTranscript = "") {
@@ -694,6 +700,7 @@ function setupSpeechRecognition() {
   recognition.interimResults = true;
 
   recognition.addEventListener("start", () => {
+    isRecognitionActive = true;
     transcriptBase = argumentInput.value.trim();
     finalTranscript = "";
     latestInterimTranscript = "";
@@ -720,6 +727,7 @@ function setupSpeechRecognition() {
   });
 
   recognition.addEventListener("end", () => {
+    isRecognitionActive = false;
     setListening(false);
     isControlRecording = false;
     if (!finalTranscript && latestInterimTranscript) {
@@ -741,29 +749,40 @@ function setupSpeechRecognition() {
       "audio-capture": "Aucun micro disponible.",
     };
     setMicrophoneStatus(messages[event.error] || "Erreur de reconnaissance vocale.", true);
+    isRecognitionActive = false;
     setListening(false);
     isControlRecording = false;
   });
 }
 
-function startRecognition() {
-  if (!recognition || isListening || !hasStarted || argumentInput.disabled) {
+function startRecognition(mode = "manual") {
+  if (!recognition || isRecognitionActive || isListening || !hasStarted || argumentInput.disabled) {
     return;
   }
 
   try {
+    recognitionMode = mode;
+    isRecognitionActive = true;
     recognition.start();
   } catch {
+    isRecognitionActive = false;
     setMicrophoneStatus("Le micro est deja en cours d'utilisation.", true);
   }
 }
 
 function stopRecognition() {
-  if (!recognition || !isListening) {
+  if (!recognition || (!isRecognitionActive && !isListening)) {
     return;
   }
 
-  recognition.stop();
+  isRecognitionActive = false;
+  isControlRecording = false;
+  setMicrophoneStatus("Arret du micro...");
+  try {
+    recognition.stop();
+  } catch {
+    setListening(false);
+  }
 }
 
 microphoneButton.addEventListener("click", () => {
@@ -771,14 +790,13 @@ microphoneButton.addEventListener("click", () => {
     return;
   }
 
-  if (isListening) {
-    isControlRecording = false;
+  if (isRecognitionActive || isListening) {
     stopRecognition();
     return;
   }
 
   isControlRecording = false;
-  startRecognition();
+  startRecognition("manual");
 });
 
 document.addEventListener("keydown", (event) => {
@@ -786,13 +804,13 @@ document.addEventListener("keydown", (event) => {
     return;
   }
 
-  if (!recognition || !hasStarted || argumentInput.disabled) {
+  if (!recognition || isRecognitionActive || isListening || !hasStarted || argumentInput.disabled) {
     return;
   }
 
   event.preventDefault();
   isControlRecording = true;
-  startRecognition();
+  startRecognition("control");
 });
 
 document.addEventListener("keyup", (event) => {
