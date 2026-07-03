@@ -131,7 +131,7 @@ class GitHubModelsChatCompletions:
             )
             for choice in data.get("choices", [])
         ]
-        return SimpleNamespace(choices=choices, usage=data.get("usage"))
+        return SimpleNamespace(choices=choices)
 
 
 class GitHubModelsChat:
@@ -254,13 +254,13 @@ def get_github_models_client(api_token: str) -> GitHubModelsClient:
     return GitHubModelsClient(api_key=token, base_url=GITHUB_MODELS_BASE_URL)
 
 
-def get_llm_config(api_token: str, model_level: str) -> tuple[GitHubModelsClient, str, str]:
+def get_llm_config(api_token: str, model_level: str) -> tuple[GitHubModelsClient, str]:
     model = MODEL_LEVELS.get(model_level, GITHUB_MODELS_MEDIUM_MODEL)
-    return get_github_models_client(api_token), model, "github_copilot"
+    return get_github_models_client(api_token), model
 
 
-def get_embedding_config(api_token: str) -> tuple[GitHubModelsClient, str, str]:
-    return get_github_models_client(api_token), GITHUB_MODELS_EMBEDDING_MODEL, "github_copilot"
+def get_embedding_config(api_token: str) -> tuple[GitHubModelsClient, str]:
+    return get_github_models_client(api_token), GITHUB_MODELS_EMBEDDING_MODEL
 
 
 def get_embedding_vectors(client: GitHubModelsClient, model: str, texts: list[str]) -> list[list[float]]:
@@ -429,7 +429,7 @@ async def build_document_session(
             detail="Aucun contenu exploitable trouve dans la documentation projet.",
         )
 
-    client, embedding_model, _ = get_embedding_config(api_token)
+    client, embedding_model = get_embedding_config(api_token)
     try:
         raw_vectors = get_embedding_vectors(
             client,
@@ -531,7 +531,7 @@ def retrieve_project_context(
     if not query_terms:
         selected_chunks = session.chunks[: min(MAX_RETRIEVED_DOCUMENT_CHUNKS, len(session.chunks))]
     else:
-        client, embedding_model, _ = get_embedding_config(api_token)
+        client, embedding_model = get_embedding_config(api_token)
         try:
             query_vector = normalize_vector(get_embedding_vectors(client, embedding_model, [query])[0])
         except Exception as exc:
@@ -562,38 +562,6 @@ def retrieve_project_context(
         for chunk in selected_chunks
     ]
     return "\n\n---\n\n".join(sections)
-
-
-def get_nested_usage_value(source: object, name: str) -> int:
-    if source is None:
-        return 0
-    if isinstance(source, dict):
-        value = source.get(name, 0)
-    else:
-        value = getattr(source, name, 0)
-    return value or 0
-
-
-def build_usage_report(
-    usage: object | None,
-    provider: str,
-    model: str,
-) -> dict[str, int | None | str]:
-    prompt_tokens = get_nested_usage_value(usage, "prompt_tokens")
-    completion_tokens = get_nested_usage_value(usage, "completion_tokens")
-    total_tokens = get_nested_usage_value(usage, "total_tokens")
-    prompt_details = get_nested_usage_value(usage, "prompt_tokens_details")
-    cached_prompt_tokens = get_nested_usage_value(prompt_details, "cached_tokens")
-
-    return {
-        "provider": provider,
-        "model": model,
-        "prompt_tokens": prompt_tokens,
-        "cached_prompt_tokens": cached_prompt_tokens,
-        "completion_tokens": completion_tokens,
-        "total_tokens": total_tokens,
-        "cost_usd": None,
-    }
 
 
 def get_client_profile(profile: str) -> dict[str, str]:
@@ -920,7 +888,7 @@ async def negotiate(
     else:
         messages.append({"role": "user", "content": build_opening_prompt()})
 
-    client, model, provider = get_llm_config(api_token, model_level)
+    client, model = get_llm_config(api_token, model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -930,7 +898,6 @@ async def negotiate(
     content = response.choices[0].message.content or ""
     return {
         "reply": content.strip(),
-        "usage": build_usage_report(response.usage, provider, model),
     }
 
 
@@ -1013,7 +980,7 @@ async def help_answer(
         }
     )
 
-    client, model, provider = get_llm_config(api_token, model_level)
+    client, model = get_llm_config(api_token, model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -1023,7 +990,6 @@ async def help_answer(
     content = response.choices[0].message.content or ""
     return {
         "reply": content.strip(),
-        "usage": build_usage_report(response.usage, provider, model),
     }
 
 
@@ -1104,7 +1070,7 @@ Important:
         }
     )
 
-    client, model, provider = get_llm_config(api_token, model_level)
+    client, model = get_llm_config(api_token, model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -1116,7 +1082,6 @@ Important:
     return {
         "report": report,
         "markdown": build_report_markdown(report),
-        "usage": build_usage_report(response.usage, provider, model),
     }
 
 
@@ -1151,7 +1116,7 @@ async def improve_report(
             detail="Prompt d'amelioration du rapport invalide.",
         ) from exc
 
-    client, model, provider = get_llm_config(api_token, model_level)
+    client, model = get_llm_config(api_token, model_level)
     try:
         response = client.chat.completions.create(
             model=model,
@@ -1174,5 +1139,4 @@ async def improve_report(
 
     return {
         "improvement": improvement,
-        "usage": build_usage_report(response.usage, provider, model),
     }
