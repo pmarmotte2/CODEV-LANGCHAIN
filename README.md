@@ -6,7 +6,7 @@ CODEV simule un atelier de cadrage avec plusieurs profils client, detecte les zo
 L'objectif n'est pas de remplacer le chef de projet ou le developpeur, mais de faire ressortir plus tot les ambiguites qui generent souvent des bugs, des retours client ou des changements de perimetre.
 
 ## Demonstration
-
+Cliquez pour voir la vidéo.
 [<img src="https://img.youtube.com/vi/lZ-jVU_h800/hqdefault.jpg" width="600" height="300"
 />](https://www.youtube.com/embed/lZ-jVU_h800)
 
