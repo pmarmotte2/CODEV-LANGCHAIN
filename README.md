@@ -7,9 +7,9 @@ L'objectif n'est pas de remplacer le chef de projet ou le developpeur, mais de f
 
 ## Demonstration
 
-<video src="demo/demo.mp4" controls width="100%">
-  Votre navigateur ne supporte pas la lecture video.
-</video>
+<p align="center" width="100%">
+<video src="https://github.com/pmarmotte2/CODEV/blob/main/demo/demo.mp4" width="80%" controls></video>
+</p>
 
 Si la video ne s'affiche pas dans le rendu Markdown, ouvrir directement `demo/demo.mp4`.
 
