@@ -9,6 +9,8 @@ const agreementInput = document.querySelector("#agreement");
 const projectDocsInput = document.querySelector("#project-docs");
 const projectDocDirectoryInput = document.querySelector("#project-doc-directory");
 const messagesNode = document.querySelector("#messages");
+const validatedDecisionsNode = document.querySelector("#validated-decisions");
+const decisionsEmptyNode = document.querySelector("#decisions-empty");
 const sendButton = document.querySelector("#send");
 const startButton = document.querySelector("#start");
 const resetButton = document.querySelector("#reset");
@@ -29,6 +31,7 @@ const blockingLoaderTitle = document.querySelector("#blocking-loader-title");
 const blockingLoaderText = document.querySelector("#blocking-loader-text");
 
 let history = [];
+let validatedDecisions = [];
 let hasStarted = false;
 let documentSessionId = "";
 let documentSessionSignature = "";
@@ -69,6 +72,39 @@ function appendMessage(role, content) {
   message.append(author, body);
   messagesNode.append(message);
   messagesNode.scrollTop = messagesNode.scrollHeight;
+}
+
+function normalizeDecision(decision) {
+  return String(decision || "").replace(/\s+/g, " ").trim();
+}
+
+function renderValidatedDecisions() {
+  validatedDecisionsNode.innerHTML = "";
+  decisionsEmptyNode.hidden = validatedDecisions.length > 0;
+
+  for (const decision of validatedDecisions) {
+    const item = document.createElement("li");
+    item.textContent = decision;
+    validatedDecisionsNode.append(item);
+  }
+}
+
+function addValidatedDecisions(decisions) {
+  if (!Array.isArray(decisions)) {
+    return;
+  }
+
+  const knownDecisions = new Set(validatedDecisions.map((decision) => decision.toLowerCase()));
+  for (const rawDecision of decisions) {
+    const decision = normalizeDecision(rawDecision);
+    if (!decision || knownDecisions.has(decision.toLowerCase())) {
+      continue;
+    }
+    validatedDecisions.push(decision);
+    knownDecisions.add(decision.toLowerCase());
+  }
+
+  renderValidatedDecisions();
 }
 
 function appendReport(report, markdown) {
@@ -131,6 +167,7 @@ function appendReport(report, markdown) {
   message.append(title, summary, scoreGrid, criticalTitle, criticalList, actions);
   messagesNode.append(message);
   messagesNode.scrollTop = messagesNode.scrollHeight;
+  addValidatedDecisions(report.clarified_points);
 }
 
 function appendImprovement(improvement) {
@@ -287,6 +324,7 @@ function buildPayload(argument = "") {
   payload.append("api_token", apiTokenInput.value.trim());
   payload.append("argument", argument);
   payload.append("history", JSON.stringify(history));
+  payload.append("validated_decisions", JSON.stringify(validatedDecisions));
   payload.append("document_session_id", documentSessionId);
   if (agreementInput.files[0]) {
     payload.append("agreement", agreementInput.files[0]);
@@ -843,8 +881,10 @@ startButton.addEventListener("click", async () => {
   }
 
   history = [];
+  validatedDecisions = [];
   hasStarted = false;
   messagesNode.innerHTML = "";
+  renderValidatedDecisions();
   argumentInput.value = "";
   resetTranscriptState();
   setComposerEnabled(false);
@@ -1026,9 +1066,11 @@ resetButton.addEventListener("click", () => {
     stopRecognition();
   }
   history = [];
+  validatedDecisions = [];
   hasStarted = false;
   documentSessionId = "";
   documentSessionSignature = "";
+  renderValidatedDecisions();
   topicInput.value = "";
   modelLevelInput.value = "medium";
   argumentInput.value = "";
@@ -1066,4 +1108,5 @@ if (speechSynthesizer) {
 setupSpeechRecognition();
 renderProviderHelp();
 renderTtsProvider();
+renderValidatedDecisions();
 setComposerEnabled(false);

@@ -158,11 +158,24 @@
             </div>
           </div>
 
-          <div id="messages" class="messages" aria-live="polite">
-            <article class="message assistant">
-              <strong>Client</strong>
-              <p>Decrivez l'evolution ou la correction, ajoutez un PDF si utile, puis demarrez la discussion.</p>
-            </article>
+          <div class="conversation-body">
+            <div id="messages" class="messages" aria-live="polite">
+              <article class="message assistant">
+                <strong>Client</strong>
+                <p>Decrivez l'evolution ou la correction, ajoutez un PDF si utile, puis demarrez la discussion.</p>
+              </article>
+            </div>
+
+            <aside class="decisions-panel" aria-label="Decisions validees">
+              <div>
+                <p class="eyebrow">Memoire projet</p>
+                <h2>Decisions validees</h2>
+              </div>
+              <p id="decisions-empty" class="decisions-empty">
+                Les decisions clarifiees apparaitront ici apres generation du rapport.
+              </p>
+              <ul id="validated-decisions" class="validated-decisions"></ul>
+            </aside>
           </div>
 
           <form id="negotiation-form" class="composer">

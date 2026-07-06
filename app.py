@@ -570,6 +570,40 @@ def build_project_context(project_document_text: str) -> str:
     return "\n\nAucune documentation projet n'a ete fournie."
 
 
+def parse_validated_decisions(raw_decisions: str) -> list[str]:
+    if not raw_decisions:
+        return []
+    try:
+        parsed_decisions = json.loads(raw_decisions)
+    except Exception:
+        return []
+    if not isinstance(parsed_decisions, list):
+        return []
+    decisions = []
+    for decision in parsed_decisions:
+        text = re.sub(r"\s+", " ", str(decision)).strip()
+        if text:
+            decisions.append(text)
+    return decisions[:20]
+
+
+def append_validated_decisions_context(
+    project_document_text: str,
+    validated_decisions: list[str],
+) -> str:
+    if not validated_decisions:
+        return project_document_text
+    decisions_text = "\n".join(f"- {decision}" for decision in validated_decisions)
+    return "\n\n".join(
+        section
+        for section in [
+            project_document_text.strip(),
+            f"Decisions deja validees pendant le cadrage:\n{decisions_text}",
+        ]
+        if section
+    )
+
+
 def build_system_prompt(
     change_description: str,
     change_document_text: str,
@@ -811,6 +845,7 @@ async def negotiate(
     model_level: Annotated[str, Form()] = "medium",
     api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
+    validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
     agreement: Annotated[UploadFile | None, File()] = None,
     project_docs: Annotated[list[UploadFile] | None, File()] = None,
@@ -847,6 +882,10 @@ async def negotiate(
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
+    project_document_text = append_validated_decisions_context(
+        project_document_text,
+        parse_validated_decisions(validated_decisions),
+    )
 
     messages = [
         {
@@ -893,6 +932,7 @@ async def help_answer(
     model_level: Annotated[str, Form()] = "medium",
     api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
+    validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
     agreement: Annotated[UploadFile | None, File()] = None,
     project_docs: Annotated[list[UploadFile] | None, File()] = None,
@@ -931,6 +971,10 @@ async def help_answer(
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
+    project_document_text = append_validated_decisions_context(
+        project_document_text,
+        parse_validated_decisions(validated_decisions),
+    )
 
     messages = [
         {
@@ -984,6 +1028,7 @@ async def framing_report(
     model_level: Annotated[str, Form()] = "medium",
     api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
+    validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
     agreement: Annotated[UploadFile | None, File()] = None,
     project_docs: Annotated[list[UploadFile] | None, File()] = None,
@@ -1019,6 +1064,10 @@ async def framing_report(
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
+    project_document_text = append_validated_decisions_context(
+        project_document_text,
+        parse_validated_decisions(validated_decisions),
+    )
 
     messages = [
         {
