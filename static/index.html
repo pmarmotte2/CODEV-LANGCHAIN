@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Assistant de CODEV</title>
+    <link rel="icon" href="/static/favicon.svg" type="image/svg+xml" />
     <link rel="stylesheet" href="/static/styles.css" />
   </head>
   <body>
@@ -53,20 +54,6 @@
               <span class="field-hint">Leger est plus rapide, Fort est plus approfondi.</span>
             </label>
 
-            <label class="field">
-              <a
-                class="field-label-link"
-                href="https://github.com/settings/personal-access-tokens/new?name=CODEV%20GitHub%20Models&user_models=read"
-                target="_blank"
-                rel="noreferrer"
-              >
-                Token GitHub Models
-              </a>
-              <input id="api-token" type="password" autocomplete="off" placeholder="github_pat_..." />
-              <span id="token-hint" class="field-hint">
-                Votre token est envoye au serveur local uniquement pour cet appel.
-              </span>
-            </label>
           </section>
 
           <section class="config-card">
@@ -94,6 +81,21 @@
           </section>
 
           <button id="start" type="button">Demarrer la discussion</button>
+
+          <div class="session-actions" aria-label="Sauvegarde de la discussion">
+            <button id="save-session" class="secondary-action" type="button" disabled>
+              Sauvegarder
+            </button>
+            <div class="saved-session-picker">
+              <label for="saved-session-select">Sauvegardes disponibles</label>
+              <select id="saved-session-select">
+                <option value="">Aucune sauvegarde</option>
+              </select>
+            </div>
+            <button id="load-session" class="secondary-action" type="button" disabled>
+              Charger la sauvegarde
+            </button>
+          </div>
 
           <section class="config-card voice-panel" aria-label="Lecture vocale">
             <div class="card-heading">
@@ -172,7 +174,7 @@
                 <h2>Decisions validees</h2>
               </div>
               <p id="decisions-empty" class="decisions-empty">
-                Les decisions clarifiees apparaitront ici apres generation du rapport.
+                Les decisions issues des documents, du client et de l'utilisateur CODEV apparaitront ici au fil de l'echange.
               </p>
               <ul id="validated-decisions" class="validated-decisions"></ul>
             </aside>
@@ -197,6 +199,20 @@
               <button id="send" type="submit">Envoyer la reponse</button>
             </div>
           </form>
+
+          <footer class="session-cost" aria-label="Cout OpenAI de la session">
+            <div class="session-cost-heading">
+              <span class="cost-pulse" aria-hidden="true"></span>
+              <div>
+                <strong>Cout OpenAI estime</strong>
+                <small>Session en cours</small>
+              </div>
+            </div>
+            <div class="session-cost-total">
+              <strong id="session-cost-value">0,000000 $US</strong>
+              <span id="session-cost-meta" aria-live="polite">0 appel · 0 token</span>
+            </div>
+          </footer>
         </section>
       </section>
     </main>

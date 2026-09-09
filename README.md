@@ -34,20 +34,28 @@ CODEV peut alors faire emerger des questions comme:
 
 - Simulation d'un atelier de cadrage avec un profil commercial, technique ou responsable.
 - Questions successives pour challenger les impacts fonctionnels, les risques, les cas limites et les criteres d'acceptation.
+- Detection et affichage progressifs des decisions explicitement validees, distinguees selon leur origine: documentation projet, utilisateur CODEV ou persona client (commercial, developpeur, responsable produit).
+- Infobulle de tracabilite sur chaque decision avec l'extrait exact du document ou de l'echange qui justifie sa validation.
+- Sauvegarde locale et reprise depuis une liste deroulante, avec la discussion, ses decisions, son cout cumule et son dernier rapport de maturite.
+- Estimation en bas d'interface du cout OpenAI cumule pour la session et des tokens consommes.
 - Aide au developpeur pour preparer une reponse sans repondre a sa place.
 - Indexation optionnelle de documentation projet PDF ou Markdown pour contextualiser les questions.
 - Score de maturite du besoin sur plusieurs axes: completude, securite, performance, UX, donnees et exploitabilite.
+- Evaluation conservatrice: un axe non discute reste faible et le score global est calcule a partir des trois axes les moins matures.
 - Rapport de cadrage telechargeable en HTML, imprimable en PDF depuis le navigateur.
 - Analyse du rapport pour expliquer les actions qui feraient progresser le score de maturite.
 
-Le fournisseur LLM utilise est GitHub Copilot via GitHub Models.
-L'interface demande un fine-grained token GitHub ayant `Models` en lecture.
+Le fournisseur LLM utilise est l'API OpenAI. La cle est lue cote serveur depuis
+la variable d'environnement `OPENAI_API_KEY` et n'est jamais demandee dans l'interface.
 
 La documentation projet peut etre fournie sous forme de PDF, de fichiers Markdown, ou d'un dossier wiki Markdown.
 Elle est indexee une fois dans une session documentaire locale, puis seuls les extraits utiles sont injectes dans les prompts.
 Le bouton `Aide-moi a repondre` utilise la discussion et cette session documentaire pour proposer une approche de reponse au developpeur, sans repondre a sa place.
 Le bouton `Generer le rapport` synthetise la discussion, calcule un score de maturite, liste les points critiques restants et propose des criteres d'acceptation.
 Une fois le rapport genere, le bouton `Ameliorer le rapport` analyse les axes faibles et propose les questions, decisions et actions qui permettraient d'augmenter le score.
+Le bouton `Sauvegarder` cree dans `data/sessions/` un dossier lisible compose d'un titre metier et d'un horodatage. Le titre est genere par le modele leger lors de la premiere sauvegarde, puis conserve pour toutes les sauvegardes suivantes de la meme discussion; seul l'horodatage change. Les discussions disponibles sont proposees directement dans la liste deroulante de l'interface.
+
+La documentation projet, ses fragments et ses embeddings sont sauvegardes avec la discussion puis recharges en memoire sans nouvel appel d'embedding tant que le modele n'a pas change. Si le modele change, l'index est reconstruit et sauvegarde automatiquement. Le PDF optionnel de description de l'evolution doit en revanche etre reselectionne si la description texte ne suffit pas. Le repertoire `data/sessions/` peut contenir des documents sensibles et reste exclu de Git.
 
 ## Prompts utilises
 
@@ -64,7 +72,7 @@ Les prompts sont disponibles dans le dossier `prompts/` pour faciliter la revue 
 
 La session documentaire utilise une recherche hybride:
 
-- embeddings `openai/text-embedding-3-small` via GitHub Models
+- embeddings `text-embedding-3-small` via OpenAI
 - score lexical local pour conserver les correspondances exactes sur les noms d'ecrans, champs, erreurs et acronymes
 - index vectoriel Python integre, accelere automatiquement par `turbovec`
 
@@ -112,14 +120,16 @@ pip install -r requirements.txt
 ## Configuration
 
 ```powershell
-$env:GITHUB_MODELS_LIGHT_MODEL="openai/gpt-4.1-nano"
-$env:GITHUB_MODELS_MEDIUM_MODEL="openai/gpt-4.1-mini"
-$env:GITHUB_MODELS_STRONG_MODEL="openai/gpt-4.1"
-$env:GITHUB_MODELS_EMBEDDING_MODEL="openai/text-embedding-3-small"
+$env:OPENAI_API_KEY="votre_cle_openai"
+$env:OPENAI_LIGHT_MODEL="gpt-5-nano"
+$env:OPENAI_MEDIUM_MODEL="gpt-5.6-luna"
+$env:OPENAI_STRONG_MODEL="gpt-4.1"
+$env:OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
 $env:ELEVENLABS_TTS_MODEL="eleven_multilingual_v2"
 ```
 
-Les tokens API sont saisis dans l'interface avant de demarrer la discussion.
+Seule `OPENAI_API_KEY` est obligatoire. Si elle est definie dans les variables
+utilisateur ou systeme Windows, ouvrez un nouveau terminal avant de lancer l'application.
 La puissance d'analyse est selectionnable dans l'interface:
 
 - `Leger`: reponses plus rapides pour les echanges simples.

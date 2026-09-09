@@ -3,6 +3,9 @@ setlocal
 
 cd /d "%~dp0"
 
+rem Override machine-wide pip indexes (for example NVIDIA NGC) for this project.
+set "PIP_CONFIG_FILE=%~dp0pip.ini"
+
 echo [CODEV] Installation de l'environnement local...
 
 where python >nul 2>nul

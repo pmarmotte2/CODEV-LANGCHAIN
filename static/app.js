@@ -2,8 +2,6 @@ const form = document.querySelector("#negotiation-form");
 const topicInput = document.querySelector("#topic");
 const profileInput = document.querySelector("#profile");
 const modelLevelInput = document.querySelector("#model-level");
-const apiTokenInput = document.querySelector("#api-token");
-const tokenHintNode = document.querySelector("#token-hint");
 const argumentInput = document.querySelector("#argument");
 const agreementInput = document.querySelector("#agreement");
 const projectDocsInput = document.querySelector("#project-docs");
@@ -14,6 +12,9 @@ const decisionsEmptyNode = document.querySelector("#decisions-empty");
 const sendButton = document.querySelector("#send");
 const startButton = document.querySelector("#start");
 const resetButton = document.querySelector("#reset");
+const saveSessionButton = document.querySelector("#save-session");
+const loadSessionButton = document.querySelector("#load-session");
+const savedSessionSelect = document.querySelector("#saved-session-select");
 const microphoneButton = document.querySelector("#microphone");
 const helpAnswerButton = document.querySelector("#help-answer");
 const framingReportButton = document.querySelector("#framing-report");
@@ -29,18 +30,28 @@ const stopVoiceButton = document.querySelector("#stop-voice");
 const blockingLoader = document.querySelector("#blocking-loader");
 const blockingLoaderTitle = document.querySelector("#blocking-loader-title");
 const blockingLoaderText = document.querySelector("#blocking-loader-text");
+const sessionCostValue = document.querySelector("#session-cost-value");
+const sessionCostMeta = document.querySelector("#session-cost-meta");
 
 let history = [];
 let validatedDecisions = [];
 let hasStarted = false;
 let documentSessionId = "";
 let documentSessionSignature = "";
+let sessionSourceFiles = { agreement: "", project_documents: [] };
 let recognition = null;
 let isListening = false;
 let isRecognitionActive = false;
 let transcriptBase = "";
 let finalTranscript = "";
 let latestInterimTranscript = "";
+let sessionCostUsd = 0;
+let sessionOpenAICalls = 0;
+let sessionOpenAITokens = 0;
+let hasUnpricedOpenAIUsage = false;
+let lastReport = null;
+let lastReportMarkdown = "";
+let sessionDisplayName = "";
 let isControlRecording = false;
 let recognitionMode = "manual";
 let currentAudio = null;
@@ -74,17 +85,126 @@ function appendMessage(role, content) {
   messagesNode.scrollTop = messagesNode.scrollHeight;
 }
 
-function normalizeDecision(decision) {
-  return String(decision || "").replace(/\s+/g, " ").trim();
+function normalizeDecision(decision, defaultProfile = profileInput.value) {
+  if (decision && typeof decision === "object") {
+    const source = ["document", "client", "codev_user"].includes(decision.source)
+      ? decision.source
+      : "client";
+    const profile = ["sales", "technical", "boss"].includes(decision.profile)
+      ? decision.profile
+      : defaultProfile;
+    return {
+      text: String(decision.text || "").replace(/\s+/g, " ").trim(),
+      evidence: String(decision.evidence || "").replace(/\s+/g, " ").trim(),
+      source,
+      profile,
+    };
+  }
+  return {
+    text: String(decision || "").replace(/\s+/g, " ").trim(),
+    evidence: "",
+    source: "client",
+    profile: defaultProfile,
+  };
+}
+
+function getDecisionPresentation(decision) {
+  if (decision.source === "document") {
+    return { icon: "DOC", label: "Documentation projet", className: "document" };
+  }
+  if (decision.source === "codev_user") {
+    return { icon: "C", label: "Utilisateur CODEV", className: "codev-user" };
+  }
+  const profiles = {
+    sales: { icon: "€", label: "Client commercial", className: "client-sales" },
+    technical: { icon: "</>", label: "Client développeur", className: "client-technical" },
+    boss: { icon: "◆", label: "Client responsable", className: "client-boss" },
+  };
+  return profiles[decision.profile] || profiles.sales;
+}
+
+function normalizeDecisionComparisonText(value) {
+  return String(value || "")
+    .normalize("NFD")
+    .replace(/[\u0300-\u036f]/g, "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, " ")
+    .trim();
+}
+
+function decisionTextsAreSimilar(left, right) {
+  const leftText = normalizeDecisionComparisonText(left);
+  const rightText = normalizeDecisionComparisonText(right);
+  if (!leftText || !rightText) {
+    return false;
+  }
+  if (leftText === rightText) {
+    return true;
+  }
+  if (Math.min(leftText.length, rightText.length) >= 24 && (
+    leftText.includes(rightText) || rightText.includes(leftText)
+  )) {
+    return true;
+  }
+  const leftTokens = new Set(leftText.split(" "));
+  const rightTokens = new Set(rightText.split(" "));
+  const overlap = [...leftTokens].filter((token) => rightTokens.has(token)).length;
+  return overlap / Math.max(Math.min(leftTokens.size, rightTokens.size), 1) >= 0.72;
+}
+
+function deduplicateValidatedDecisions() {
+  const unique = [];
+  for (const decision of validatedDecisions) {
+    const duplicate = unique.find(
+      (known) =>
+        known.source === decision.source &&
+        (decisionTextsAreSimilar(known.text, decision.text) ||
+          (known.evidence &&
+            decision.evidence &&
+            decisionTextsAreSimilar(known.evidence, decision.evidence))),
+    );
+    if (!duplicate) {
+      unique.push(decision);
+    } else if (!duplicate.evidence && decision.evidence) {
+      duplicate.evidence = decision.evidence;
+    }
+  }
+  validatedDecisions = unique;
 }
 
 function renderValidatedDecisions() {
+  deduplicateValidatedDecisions();
   validatedDecisionsNode.innerHTML = "";
   decisionsEmptyNode.hidden = validatedDecisions.length > 0;
 
   for (const decision of validatedDecisions) {
+    const presentation = getDecisionPresentation(decision);
     const item = document.createElement("li");
-    item.textContent = decision;
+    item.classList.add(`decision-${presentation.className}`);
+    item.tabIndex = 0;
+    const icon = document.createElement("span");
+    icon.className = "decision-icon";
+    icon.textContent = presentation.icon;
+    icon.setAttribute("aria-hidden", "true");
+    const content = document.createElement("span");
+    content.className = "decision-content";
+    const text = document.createElement("span");
+    text.textContent = decision.text;
+    const origin = document.createElement("small");
+    origin.textContent = presentation.label;
+    content.append(text, origin);
+    item.append(icon, content);
+    if (decision.evidence) {
+      const evidence = document.createElement("span");
+      evidence.className = "decision-evidence";
+      evidence.id = `decision-evidence-${validatedDecisionsNode.children.length}`;
+      evidence.setAttribute("role", "tooltip");
+      evidence.textContent = `Extrait : « ${decision.evidence} »`;
+      item.setAttribute("aria-describedby", evidence.id);
+      item.append(evidence);
+    } else {
+      item.title = "Aucun extrait disponible pour cette ancienne décision.";
+    }
     validatedDecisionsNode.append(item);
   }
 }
@@ -94,17 +214,62 @@ function addValidatedDecisions(decisions) {
     return;
   }
 
-  const knownDecisions = new Set(validatedDecisions.map((decision) => decision.toLowerCase()));
   for (const rawDecision of decisions) {
     const decision = normalizeDecision(rawDecision);
-    if (!decision || knownDecisions.has(decision.toLowerCase())) {
+    const duplicate = validatedDecisions.find(
+      (known) =>
+        known.source === decision.source &&
+        (decisionTextsAreSimilar(known.text, decision.text) ||
+          (known.evidence &&
+            decision.evidence &&
+            decisionTextsAreSimilar(known.evidence, decision.evidence))),
+    );
+    if (!decision.text || duplicate) {
+      if (duplicate && !duplicate.evidence && decision.evidence) {
+        duplicate.evidence = decision.evidence;
+      }
       continue;
     }
     validatedDecisions.push(decision);
-    knownDecisions.add(decision.toLowerCase());
   }
 
   renderValidatedDecisions();
+}
+
+function formatSessionCost(value) {
+  return new Intl.NumberFormat("fr-FR", {
+    style: "currency",
+    currency: "USD",
+    minimumFractionDigits: 6,
+    maximumFractionDigits: 6,
+  }).format(value);
+}
+
+function formatCount(value, singular, plural) {
+  return `${new Intl.NumberFormat("fr-FR").format(value)} ${value === 1 ? singular : plural}`;
+}
+
+function renderSessionCost() {
+  sessionCostValue.textContent = formatSessionCost(sessionCostUsd);
+  const parts = [
+    formatCount(sessionOpenAICalls, "appel", "appels"),
+    formatCount(sessionOpenAITokens, "token", "tokens"),
+  ];
+  if (hasUnpricedOpenAIUsage) {
+    parts.push("tarif partiel");
+  }
+  sessionCostMeta.textContent = parts.join(" · ");
+}
+
+function addOpenAIUsage(usage) {
+  if (!usage || typeof usage !== "object") {
+    return;
+  }
+  sessionCostUsd += Number(usage.estimated_cost_usd || 0);
+  sessionOpenAICalls += Number(usage.api_calls || 0);
+  sessionOpenAITokens += Number(usage.total_tokens || 0);
+  hasUnpricedOpenAIUsage ||= usage.fully_priced === false;
+  renderSessionCost();
 }
 
 function appendReport(report, markdown) {
@@ -167,7 +332,6 @@ function appendReport(report, markdown) {
   message.append(title, summary, scoreGrid, criticalTitle, criticalList, actions);
   messagesNode.append(message);
   messagesNode.scrollTop = messagesNode.scrollHeight;
-  addValidatedDecisions(report.clarified_points);
 }
 
 function appendImprovement(improvement) {
@@ -236,6 +400,8 @@ function setLoading(isLoading) {
   helpAnswerButton.disabled = isLoading || !hasStarted;
   framingReportButton.disabled = isLoading || !hasStarted;
   startButton.disabled = isLoading || hasStarted;
+  saveSessionButton.disabled = isLoading || !hasStarted;
+  loadSessionButton.disabled = isLoading || !savedSessionSelect.value;
   sendButton.textContent = isLoading ? "Question en cours..." : "Envoyer la reponse";
   startButton.textContent = isLoading ? "Client en cours..." : "Demarrer la discussion";
 }
@@ -251,7 +417,6 @@ function setComposerEnabled(isEnabled) {
 function setSetupEnabled(isEnabled) {
   topicInput.disabled = !isEnabled;
   modelLevelInput.disabled = !isEnabled;
-  apiTokenInput.disabled = !isEnabled;
   agreementInput.disabled = !isEnabled;
   projectDocsInput.disabled = !isEnabled;
   projectDocDirectoryInput.disabled = !isEnabled;
@@ -259,10 +424,6 @@ function setSetupEnabled(isEnabled) {
 
 function hasSourceContent() {
   return Boolean(topicInput.value.trim() || agreementInput.files[0]);
-}
-
-function hasApiToken() {
-  return Boolean(apiTokenInput.value.trim());
 }
 
 function getProjectDocumentFiles() {
@@ -283,7 +444,6 @@ function getProjectDocumentSignature(files) {
 async function ensureDocumentSession() {
   const files = getProjectDocumentFiles();
   if (files.length === 0) {
-    documentSessionId = "";
     documentSessionSignature = "";
     return;
   }
@@ -294,7 +454,6 @@ async function ensureDocumentSession() {
   }
 
   const payload = new FormData();
-  payload.append("api_token", apiTokenInput.value.trim());
   for (const file of files) {
     payload.append("project_docs", file, file.webkitRelativePath || file.name);
   }
@@ -309,8 +468,12 @@ async function ensureDocumentSession() {
     throw new Error(data.detail || "Documentation projet invalide.");
   }
 
+  addOpenAIUsage(data.openai_usage);
   documentSessionId = data.document_session_id;
   documentSessionSignature = signature;
+  sessionSourceFiles.project_documents = files.map(
+    (file) => file.webkitRelativePath || file.name,
+  );
   setMicrophoneStatus(
     `Documentation indexee: ${data.sources} source(s), ${data.chunks} extrait(s), mode ${data.retrieval_mode}.`,
   );
@@ -321,7 +484,6 @@ function buildPayload(argument = "") {
   payload.append("topic", topicInput.value.trim());
   payload.append("profile", profileInput.value);
   payload.append("model_level", modelLevelInput.value);
-  payload.append("api_token", apiTokenInput.value.trim());
   payload.append("argument", argument);
   payload.append("history", JSON.stringify(history));
   payload.append("validated_decisions", JSON.stringify(validatedDecisions));
@@ -332,19 +494,26 @@ function buildPayload(argument = "") {
   return payload;
 }
 
-function renderProviderHelp() {
-  apiTokenInput.placeholder = "github_pat_...";
-  tokenHintNode.textContent = "";
-  tokenHintNode.append(
-    document.createTextNode("Utilisez un fine-grained token GitHub avec Models en lecture. "),
-  );
-  const link = document.createElement("a");
-  link.href =
-    "https://github.com/settings/personal-access-tokens/new?name=CODEV%20GitHub%20Models&user_models=read";
-  link.target = "_blank";
-  link.rel = "noreferrer";
-  link.textContent = "Creer le token";
-  tokenHintNode.append(link);
+async function fetchWithDocumentSession(endpoint, argument = "") {
+  await ensureDocumentSession();
+  let response = await fetch(endpoint, {
+    method: "POST",
+    body: buildPayload(argument),
+  });
+  let data = await readJsonResponse(response);
+
+  if (response.status === 409 && documentSessionId && getProjectDocumentFiles().length > 0) {
+    documentSessionId = "";
+    documentSessionSignature = "";
+    await ensureDocumentSession();
+    response = await fetch(endpoint, {
+      method: "POST",
+      body: buildPayload(argument),
+    });
+    data = await readJsonResponse(response);
+  }
+
+  return { response, data };
 }
 
 function renderTtsProvider() {
@@ -426,13 +595,216 @@ ${markdownToPrintableHtml(markdown)}
   URL.revokeObjectURL(link.href);
 }
 
-async function improveReport(report, button) {
-  if (!hasApiToken()) {
-    appendMessage("error", "Le token API est obligatoire.");
-    apiTokenInput.focus();
+async function refreshSavedSessions(selectedId = "") {
+  const response = await fetch("/api/saved-sessions");
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.detail || "Liste des sauvegardes indisponible.");
+  }
+  savedSessionSelect.innerHTML = "";
+  const sessions = Array.isArray(data.sessions) ? data.sessions : [];
+  if (sessions.length === 0) {
+    const option = document.createElement("option");
+    option.value = "";
+    option.textContent = "Aucune sauvegarde";
+    savedSessionSelect.append(option);
+  }
+  for (const session of sessions) {
+    const option = document.createElement("option");
+    option.value = session.id;
+    const savedAt = session.saved_at ? new Date(session.saved_at).toLocaleString("fr-FR") : "";
+    option.textContent = `${session.name || "Discussion CODEV"}${savedAt ? ` - ${savedAt}` : ""}${session.has_report ? " - rapport" : ""}`;
+    option.selected = session.id === selectedId;
+    savedSessionSelect.append(option);
+  }
+  loadSessionButton.disabled = !savedSessionSelect.value;
+}
+
+async function saveSession() {
+  if (!hasStarted) {
     return;
   }
 
+  const session = {
+    format: "codev-session",
+    version: 1,
+    saved_at: new Date().toISOString(),
+    topic: topicInput.value.trim(),
+    profile: profileInput.value,
+    model_level: modelLevelInput.value,
+    display_name: sessionDisplayName,
+    history,
+    validated_decisions: validatedDecisions,
+    report: lastReport,
+    report_markdown: lastReportMarkdown,
+    document_session_id: documentSessionId,
+    source_files: {
+      agreement: agreementInput.files[0]?.name || sessionSourceFiles.agreement,
+      project_documents: getProjectDocumentFiles().length
+        ? getProjectDocumentFiles().map((file) => file.webkitRelativePath || file.name)
+        : sessionSourceFiles.project_documents,
+    },
+    openai_usage: {
+      estimated_cost_usd: sessionCostUsd,
+      api_calls: sessionOpenAICalls,
+      total_tokens: sessionOpenAITokens,
+      fully_priced: !hasUnpricedOpenAIUsage,
+    },
+  };
+  const response = await fetch("/api/saved-sessions", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(session),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.detail || "Sauvegarde impossible.");
+  }
+  addOpenAIUsage(data.openai_usage);
+  sessionDisplayName = data.display_name || sessionDisplayName;
+  await refreshSavedSessions(data.id);
+  setMicrophoneStatus("Discussion et documentation sauvegardees localement.");
+}
+
+function parseLoadedHistory(value) {
+  if (!Array.isArray(value)) {
+    throw new Error("Historique de discussion invalide.");
+  }
+  return value
+    .filter(
+      (item) =>
+        item &&
+        ["user", "assistant"].includes(item.role) &&
+        typeof item.content === "string" &&
+        item.content.trim(),
+    )
+    .map((item) => ({ role: item.role, content: item.content.trim() }));
+}
+
+async function loadSession(rawSession) {
+  if (!rawSession || typeof rawSession !== "object" || Array.isArray(rawSession)) {
+    throw new Error("Ce fichier n'est pas une sauvegarde CODEV compatible.");
+  }
+  const isCurrentSession =
+    rawSession.format === "codev-session" && Number(rawSession.version) === 1;
+  const isLegacySession =
+    !rawSession.format &&
+    Array.isArray(rawSession.history) &&
+    (typeof rawSession.topic === "string" || Array.isArray(rawSession.validated_decisions));
+  if (!isCurrentSession && !isLegacySession) {
+    if (Array.isArray(rawSession.scores) && "global_score" in rawSession) {
+      throw new Error(
+        "Ce fichier contient uniquement un rapport, pas la discussion permettant de la reprendre.",
+      );
+    }
+    if (rawSession.format === "codev-session") {
+      throw new Error(`Version de sauvegarde CODEV non prise en charge: (${rawSession.version}).`);
+    }
+    throw new Error("Ce JSON n'est pas une sauvegarde de discussion CODEV.");
+  }
+
+  let restoredDocumentSessionId = "";
+  let restorationUsage = null;
+  const savedDocumentSessionId = typeof rawSession.document_session_id === "string"
+    ? rawSession.document_session_id
+    : "";
+  if (savedDocumentSessionId) {
+    const restorePayload = new FormData();
+    restorePayload.append("document_session_id", savedDocumentSessionId);
+    const restoreResponse = await fetch("/api/document-session/restore", {
+      method: "POST",
+      body: restorePayload,
+    });
+    const restoreData = await readJsonResponse(restoreResponse);
+    if (restoreResponse.ok) {
+      restoredDocumentSessionId = restoreData.document_session_id;
+      restorationUsage = restoreData.openai_usage;
+    }
+  }
+
+  stopSpeech();
+  history = parseLoadedHistory(rawSession.history);
+  validatedDecisions = Array.isArray(rawSession.validated_decisions)
+    ? rawSession.validated_decisions
+        .map((decision) => normalizeDecision(decision, rawSession.profile || "sales"))
+        .filter((decision) => decision.text)
+        .slice(0, 100)
+    : [];
+  lastReport = rawSession.report && typeof rawSession.report === "object"
+    ? rawSession.report
+    : null;
+  lastReportMarkdown = typeof rawSession.report_markdown === "string"
+    ? rawSession.report_markdown
+    : "";
+  sessionDisplayName = typeof rawSession.display_name === "string"
+    ? rawSession.display_name
+    : "";
+  topicInput.value = typeof rawSession.topic === "string" ? rawSession.topic : "";
+  if ([...profileInput.options].some((option) => option.value === rawSession.profile)) {
+    profileInput.value = rawSession.profile;
+  }
+  if ([...modelLevelInput.options].some((option) => option.value === rawSession.model_level)) {
+    modelLevelInput.value = rawSession.model_level;
+  }
+
+  const usage = rawSession.openai_usage || {};
+  sessionCostUsd = Math.max(0, Number(usage.estimated_cost_usd) || 0);
+  sessionOpenAICalls = Math.max(0, Number(usage.api_calls) || 0);
+  sessionOpenAITokens = Math.max(0, Number(usage.total_tokens) || 0);
+  hasUnpricedOpenAIUsage = usage.fully_priced === false;
+  addOpenAIUsage(restorationUsage);
+  const sourceFiles = rawSession.source_files || {};
+  sessionSourceFiles = {
+    agreement: typeof sourceFiles.agreement === "string" ? sourceFiles.agreement : "",
+    project_documents: Array.isArray(sourceFiles.project_documents)
+      ? sourceFiles.project_documents.filter((name) => typeof name === "string")
+      : [],
+  };
+  documentSessionId = restoredDocumentSessionId;
+  documentSessionSignature = "";
+  agreementInput.value = "";
+  projectDocsInput.value = "";
+  projectDocDirectoryInput.value = "";
+  argumentInput.value = "";
+
+  messagesNode.innerHTML = "";
+  for (const item of history) {
+    appendMessage(item.role, item.content);
+  }
+  if (lastReport) {
+    appendReport(lastReport, lastReportMarkdown);
+  }
+  if (history.length === 0) {
+    appendMessage("assistant", "La sauvegarde ne contient aucun echange.");
+  }
+
+  hasStarted = history.length > 0;
+  renderValidatedDecisions();
+  renderSessionCost();
+  setSetupEnabled(!hasStarted);
+  setComposerEnabled(hasStarted);
+  setLoading(false);
+
+  const hadSources = Boolean(
+    sessionSourceFiles.agreement || sessionSourceFiles.project_documents.length,
+  );
+  if (hasStarted && hadSources && !documentSessionId) {
+    agreementInput.disabled = false;
+    projectDocsInput.disabled = false;
+    projectDocDirectoryInput.disabled = false;
+    setMicrophoneStatus(
+      "Discussion chargee. Reselectionnez les documents source avant de poursuivre.",
+    );
+  } else if (documentSessionId) {
+    setMicrophoneStatus(
+      `Discussion et documentation restaurees (${sessionSourceFiles.project_documents.length} fichier(s)).`,
+    );
+  } else {
+    setMicrophoneStatus("Discussion chargee, vous pouvez la reprendre.");
+  }
+}
+
+async function improveReport(report, button) {
   button.disabled = true;
   button.textContent = "Analyse en cours...";
   showBlockingLoader(
@@ -442,7 +814,6 @@ async function improveReport(report, button) {
   setLoading(true);
 
   const payload = new FormData();
-  payload.append("api_token", apiTokenInput.value.trim());
   payload.append("model_level", modelLevelInput.value);
   payload.append("report", JSON.stringify(report));
 
@@ -457,6 +828,7 @@ async function improveReport(report, button) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
+    addOpenAIUsage(data.openai_usage);
     appendImprovement(data.improvement || {});
     button.textContent = "Analyse generee";
   } catch (error) {
@@ -867,12 +1239,6 @@ startButton.addEventListener("click", async () => {
     return;
   }
 
-  if (!hasApiToken()) {
-    appendMessage("error", "Le token API est obligatoire pour demarrer la discussion.");
-    apiTokenInput.focus();
-    return;
-  }
-
   if (speechSynthesizer) {
     stopSpeech();
   }
@@ -882,6 +1248,9 @@ startButton.addEventListener("click", async () => {
 
   history = [];
   validatedDecisions = [];
+  lastReport = null;
+  lastReportMarkdown = "";
+  sessionDisplayName = "";
   hasStarted = false;
   messagesNode.innerHTML = "";
   renderValidatedDecisions();
@@ -891,17 +1260,15 @@ startButton.addEventListener("click", async () => {
   setLoading(true);
 
   try {
-    await ensureDocumentSession();
-    const response = await fetch("/api/negotiate", {
-      method: "POST",
-      body: buildPayload(),
-    });
-    const data = await response.json();
+    sessionSourceFiles.agreement = agreementInput.files[0]?.name || "";
+    const { response, data } = await fetchWithDocumentSession("/api/negotiate");
 
     if (!response.ok) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
+    addOpenAIUsage(data.openai_usage);
+    addValidatedDecisions(data.validated_decisions);
     history.push({ role: "assistant", content: data.reply });
     hasStarted = true;
     appendMessage("assistant", data.reply);
@@ -925,26 +1292,19 @@ helpAnswerButton.addEventListener("click", async () => {
     return;
   }
 
-  if (!hasApiToken()) {
-    appendMessage("error", "Le token API est obligatoire.");
-    apiTokenInput.focus();
-    return;
-  }
-
   setLoading(true);
 
   try {
-    await ensureDocumentSession();
-    const response = await fetch("/api/help-answer", {
-      method: "POST",
-      body: buildPayload(argumentInput.value.trim()),
-    });
-    const data = await response.json();
+    const { response, data } = await fetchWithDocumentSession(
+      "/api/help-answer",
+      argumentInput.value.trim(),
+    );
 
     if (!response.ok) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
+    addOpenAIUsage(data.openai_usage);
     appendMessage("helper", data.reply);
   } catch (error) {
     appendMessage("error", error.message);
@@ -960,12 +1320,6 @@ framingReportButton.addEventListener("click", async () => {
     return;
   }
 
-  if (!hasApiToken()) {
-    appendMessage("error", "Le token API est obligatoire.");
-    apiTokenInput.focus();
-    return;
-  }
-
   showBlockingLoader(
     "Generation du rapport...",
     "Analyse de la discussion, calcul du score et preparation des points critiques.",
@@ -973,17 +1327,15 @@ framingReportButton.addEventListener("click", async () => {
   setLoading(true);
 
   try {
-    await ensureDocumentSession();
-    const response = await fetch("/api/framing-report", {
-      method: "POST",
-      body: buildPayload(),
-    });
-    const data = await readJsonResponse(response);
+    const { response, data } = await fetchWithDocumentSession("/api/framing-report");
 
     if (!response.ok) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
+    addOpenAIUsage(data.openai_usage);
+    lastReport = data.report || null;
+    lastReportMarkdown = data.markdown || "";
     appendReport(data.report || {}, data.markdown || "");
   } catch (error) {
     appendMessage("error", error.message);
@@ -1020,12 +1372,6 @@ form.addEventListener("submit", async (event) => {
     return;
   }
 
-  if (!hasApiToken()) {
-    appendMessage("error", "Le token API est obligatoire.");
-    apiTokenInput.focus();
-    return;
-  }
-
   appendMessage("user", argument);
   if (recognition && isListening) {
     resetTranscriptState();
@@ -1034,17 +1380,14 @@ form.addEventListener("submit", async (event) => {
   setLoading(true);
 
   try {
-    await ensureDocumentSession();
-    const response = await fetch("/api/negotiate", {
-      method: "POST",
-      body: buildPayload(argument),
-    });
-    const data = await response.json();
+    const { response, data } = await fetchWithDocumentSession("/api/negotiate", argument);
 
     if (!response.ok) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
+    addOpenAIUsage(data.openai_usage);
+    addValidatedDecisions(data.validated_decisions);
     history.push({ role: "user", content: argument }, { role: "assistant", content: data.reply });
     appendMessage("assistant", data.reply);
     speakText(data.reply);
@@ -1067,10 +1410,19 @@ resetButton.addEventListener("click", () => {
   }
   history = [];
   validatedDecisions = [];
+  sessionCostUsd = 0;
+  sessionOpenAICalls = 0;
+  sessionOpenAITokens = 0;
+  hasUnpricedOpenAIUsage = false;
+  lastReport = null;
+  lastReportMarkdown = "";
+  sessionDisplayName = "";
   hasStarted = false;
   documentSessionId = "";
   documentSessionSignature = "";
+  sessionSourceFiles = { agreement: "", project_documents: [] };
   renderValidatedDecisions();
+  renderSessionCost();
   topicInput.value = "";
   modelLevelInput.value = "medium";
   argumentInput.value = "";
@@ -1085,7 +1437,38 @@ resetButton.addEventListener("click", () => {
   setSetupEnabled(true);
   setComposerEnabled(false);
   setLoading(false);
-  renderProviderHelp();
+});
+
+saveSessionButton.addEventListener("click", async () => {
+  saveSessionButton.disabled = true;
+  try {
+    await saveSession();
+  } catch (error) {
+    appendMessage("error", error.message || "Sauvegarde impossible.");
+  } finally {
+    saveSessionButton.disabled = !hasStarted;
+  }
+});
+
+savedSessionSelect.addEventListener("change", () => {
+  loadSessionButton.disabled = !savedSessionSelect.value;
+});
+
+loadSessionButton.addEventListener("click", async () => {
+  const savedSessionId = savedSessionSelect.value;
+  if (!savedSessionId) {
+    return;
+  }
+  try {
+    const response = await fetch(`/api/saved-sessions/${encodeURIComponent(savedSessionId)}`);
+    const data = await readJsonResponse(response);
+    if (!response.ok) {
+      throw new Error(data.detail || "Sauvegarde introuvable.");
+    }
+    await loadSession(data);
+  } catch (error) {
+    appendMessage("error", error.message || "Sauvegarde CODEV invalide.");
+  }
 });
 
 stopVoiceButton.addEventListener("click", () => {
@@ -1106,7 +1489,10 @@ if (speechSynthesizer) {
 }
 
 setupSpeechRecognition();
-renderProviderHelp();
 renderTtsProvider();
 renderValidatedDecisions();
+renderSessionCost();
 setComposerEnabled(false);
+refreshSavedSessions().catch((error) => {
+  setMicrophoneStatus(error.message || "Liste des sauvegardes indisponible.", true);
+});

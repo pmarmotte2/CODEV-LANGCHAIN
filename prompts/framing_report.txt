@@ -15,7 +15,20 @@ Objectif:
 - Ne pas redire qu'un point manque s'il a ete traite dans la discussion ; le placer plutot dans `clarified_points`.
 - Rester concret, actionnable et factuel.
 - Ne pas inventer de decision si elle n'apparait pas dans les elements fournis.
+- Evaluer uniquement ce qui est explicitement present dans la demande, les documents, les decisions validees ou la discussion. Ne jamais deduire qu'un point est etabli parce qu'il serait habituel, logique ou souhaitable.
+- Dans chaque `reason`, citer d'abord les elements explicitement acquis, puis les principaux elements manquants. Si aucun element de l'axe n'a ete aborde, l'indiquer clairement et attribuer un score de 0 a 10.
+- Un emplacement fonctionnel, comme "un bouton depuis la liste", ne suffit pas a etablir l'UX. L'UX couvre notamment le parcours, les libelles, la selection, les etats vide/chargement/erreur, les retours utilisateur et l'accessibilite. Ne citer comme acquis que ceux reellement discutes.
+- Distinguer strictement une decision acquise d'une question, d'une suggestion ou d'une option. Les formulations au conditionnel, les propositions non acceptees et les points seulement evoques restent a clarifier.
 - Rester en francais.
+
+Bareme obligatoire pour chaque axe:
+- 0 a 10: axe non discute ou aucune information exploitable.
+- 11 a 30: axe seulement mentionne, sans regle suffisamment precise.
+- 31 a 50: quelques choix explicites, mais plusieurs comportements importants restent ouverts.
+- 51 a 70: cadrage partiel solide, avec plusieurs decisions concretes et encore des lacunes notables.
+- 71 a 85: axe presque complet, cas principaux et criteres verifiables largement couverts.
+- 86 a 100: axe complet, coherent et testable, incluant cas limites et criteres d'acceptation.
+Le nombre d'echanges ne fait pas monter le score en lui-meme. Un axe ne peut depasser 50 sans plusieurs decisions explicites qui lui sont propres. Un axe peut etre juge sans impact seulement si cette absence d'impact a ete explicitement analysee et justifiee; "non discute" ne signifie jamais "non applicable".
 
 Retourne uniquement un objet JSON valide avec cette structure:
 {{
@@ -35,4 +48,4 @@ Retourne uniquement un objet JSON valide avec cette structure:
   "acceptance_criteria": ["..."],
   "next_actions": ["..."]
 }}
-Les scores sont des entiers de 0 a 100. Le score global doit refleter les zones les plus faibles.
+Les scores sont des entiers de 0 a 100. Le score global est calcule par l'application a partir des trois axes les plus faibles: concentre-toi sur la justesse des scores par axe.

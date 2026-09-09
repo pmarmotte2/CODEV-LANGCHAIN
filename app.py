@@ -4,29 +4,30 @@ import uuid
 import json
 import urllib.error
 import urllib.request
+import unicodedata
+from difflib import SequenceMatcher
+from datetime import datetime, timezone
+from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Annotated
 
-from fastapi import FastAPI, File, Form, HTTPException, UploadFile
+from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from pypdf import PdfReader
 
 
-GITHUB_MODELS_LIGHT_MODEL = os.getenv("GITHUB_MODELS_LIGHT_MODEL", "openai/gpt-4.1-nano")
-GITHUB_MODELS_MEDIUM_MODEL = os.getenv("GITHUB_MODELS_MEDIUM_MODEL", "openai/gpt-4.1-mini")
-GITHUB_MODELS_STRONG_MODEL = os.getenv("GITHUB_MODELS_STRONG_MODEL", "openai/gpt-4.1")
-GITHUB_MODELS_BASE_URL = os.getenv(
-    "GITHUB_MODELS_BASE_URL",
-    "https://models.github.ai/inference",
-)
+OPENAI_LIGHT_MODEL = os.getenv("OPENAI_LIGHT_MODEL", "gpt-5-nano")
+OPENAI_MEDIUM_MODEL = os.getenv("OPENAI_MEDIUM_MODEL", "gpt-5.6-luna")
+OPENAI_STRONG_MODEL = os.getenv("OPENAI_STRONG_MODEL", "gpt-4.1")
+OPENAI_BASE_URL = os.getenv("OPENAI_BASE_URL", "https://api.openai.com/v1")
 ELEVENLABS_BASE_URL = os.getenv("ELEVENLABS_BASE_URL", "https://api.elevenlabs.io")
 ELEVENLABS_TTS_MODEL = os.getenv("ELEVENLABS_TTS_MODEL", "eleven_multilingual_v2")
-GITHUB_MODELS_EMBEDDING_MODEL = os.getenv(
-    "GITHUB_MODELS_EMBEDDING_MODEL",
-    "openai/text-embedding-3-small",
+OPENAI_EMBEDDING_MODEL = os.getenv(
+    "OPENAI_EMBEDDING_MODEL",
+    "text-embedding-3-small",
 )
 MAX_PDF_CHARS = 20_000
 MAX_DOCUMENT_CHARS = 60_000
@@ -35,10 +36,60 @@ DOCUMENT_CHUNK_CHARS = 1_200
 DOCUMENT_CHUNK_OVERLAP = 180
 MAX_RETRIEVED_DOCUMENT_CHUNKS = 6
 MAX_HISTORY_MESSAGES = 12
+DOCUMENT_INDEX_VERSION = 1
+SESSION_DATA_DIR = Path(__file__).resolve().parent / "data" / "sessions"
 MODEL_LEVELS = {
-    "light": GITHUB_MODELS_LIGHT_MODEL,
-    "medium": GITHUB_MODELS_MEDIUM_MODEL,
-    "strong": GITHUB_MODELS_STRONG_MODEL,
+    "light": OPENAI_LIGHT_MODEL,
+    "medium": OPENAI_MEDIUM_MODEL,
+    "strong": OPENAI_STRONG_MODEL,
+}
+OPENAI_PRICING_USD_PER_MILLION = {
+    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    "gpt-4.1": {"input": 2.00, "cached_input": 0.50, "output": 8.00},
+    "text-embedding-3-small": {"input": 0.02, "cached_input": 0.02, "output": 0.0},
+}
+NEGOTIATION_RESPONSE_FORMAT = {
+    "type": "json_schema",
+    "json_schema": {
+        "name": "negotiation_turn",
+        "strict": True,
+        "schema": {
+            "type": "object",
+            "properties": {
+                "reply": {"type": "string"},
+                "project_decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
+                        "required": ["text", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
+                "client_decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
+                        "required": ["text", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
+                "codev_user_decisions": {
+                    "type": "array",
+                    "items": {
+                        "type": "object",
+                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
+                        "required": ["text", "evidence"],
+                        "additionalProperties": False,
+                    },
+                },
+            },
+            "required": ["reply", "project_decisions", "client_decisions", "codev_user_decisions"],
+            "additionalProperties": False,
+        },
+    },
 }
 CLIENT_PROFILES = {
     "sales": {
@@ -76,30 +127,37 @@ class DocumentSession:
     chunks: list[DocumentChunk]
     source_count: int
     retrieval_mode: str
+    embedding_model: str
+    source_files: list[tuple[str, bytes]]
     vector_index: object | None = None
 
 
-class GitHubModelsError(Exception):
+class OpenAIError(Exception):
     pass
 
 
-class GitHubModelsChatCompletions:
-    def __init__(self, client: "GitHubModelsClient") -> None:
+class OpenAIChatCompletions:
+    def __init__(self, client: "OpenAIClient") -> None:
         self.client = client
 
     def create(
         self,
         model: str,
         messages: list[dict[str, str]],
-        temperature: float,
+        response_format: dict[str, object] | None = None,
+        reasoning_effort: str | None = None,
     ) -> SimpleNamespace:
+        payload: dict[str, object] = {
+            "model": model,
+            "messages": messages,
+        }
+        if response_format is not None:
+            payload["response_format"] = response_format
+        if reasoning_effort is not None:
+            payload["reasoning_effort"] = reasoning_effort
         data = self.client.post_json(
             "/chat/completions",
-            {
-                "model": model,
-                "messages": messages,
-                "temperature": temperature,
-            },
+            payload,
         )
         choices = [
             SimpleNamespace(
@@ -107,16 +165,20 @@ class GitHubModelsChatCompletions:
             )
             for choice in data.get("choices", [])
         ]
-        return SimpleNamespace(choices=choices)
+        return SimpleNamespace(
+            choices=choices,
+            model=data.get("model", model),
+            usage=data.get("usage", {}),
+        )
 
 
-class GitHubModelsChat:
-    def __init__(self, client: "GitHubModelsClient") -> None:
-        self.completions = GitHubModelsChatCompletions(client)
+class OpenAIChat:
+    def __init__(self, client: "OpenAIClient") -> None:
+        self.completions = OpenAIChatCompletions(client)
 
 
-class GitHubModelsEmbeddings:
-    def __init__(self, client: "GitHubModelsClient") -> None:
+class OpenAIEmbeddings:
+    def __init__(self, client: "OpenAIClient") -> None:
         self.client = client
 
     def create(self, model: str, input: list[str]) -> SimpleNamespace:
@@ -131,16 +193,18 @@ class GitHubModelsEmbeddings:
             data=[
                 SimpleNamespace(embedding=item.get("embedding", []))
                 for item in data.get("data", [])
-            ]
+            ],
+            model=data.get("model", model),
+            usage=data.get("usage", {}),
         )
 
 
-class GitHubModelsClient:
+class OpenAIClient:
     def __init__(self, api_key: str, base_url: str) -> None:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.chat = GitHubModelsChat(self)
-        self.embeddings = GitHubModelsEmbeddings(self)
+        self.chat = OpenAIChat(self)
+        self.embeddings = OpenAIEmbeddings(self)
 
     def post_json(self, path: str, payload: dict[str, object]) -> dict[str, object]:
         request = urllib.request.Request(
@@ -148,9 +212,8 @@ class GitHubModelsClient:
             data=json.dumps(payload).encode("utf-8"),
             headers={
                 "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/vnd.github+json",
+                "Accept": "application/json",
                 "Content-Type": "application/json",
-                "X-GitHub-Api-Version": "2026-03-10",
             },
             method="POST",
         )
@@ -159,11 +222,11 @@ class GitHubModelsClient:
                 return json.loads(response.read().decode("utf-8"))
         except urllib.error.HTTPError as exc:
             body = exc.read().decode("utf-8", errors="replace")
-            raise GitHubModelsError(f"HTTP {exc.code}: {body}") from exc
+            raise OpenAIError(f"HTTP {exc.code}: {body}") from exc
         except urllib.error.URLError as exc:
-            raise GitHubModelsError(str(exc)) from exc
+            raise OpenAIError(str(exc)) from exc
         except json.JSONDecodeError as exc:
-            raise GitHubModelsError("Reponse GitHub Models invalide.") from exc
+            raise OpenAIError("Reponse OpenAI invalide.") from exc
 
 
 class ElevenLabsError(Exception):
@@ -220,31 +283,87 @@ def call_elevenlabs_audio(path: str, api_key: str, payload: dict[str, object]) -
         raise ElevenLabsError(str(exc)) from exc
 
 
-def get_github_models_client(api_token: str) -> GitHubModelsClient:
-    token = api_token.strip() or os.getenv("GITHUB_MODELS_TOKEN", "")
+def get_openai_client() -> OpenAIClient:
+    token = os.getenv("OPENAI_API_KEY", "").strip()
     if not token:
         raise HTTPException(
             status_code=400,
-            detail="Le token GitHub Models est obligatoire.",
+            detail="La variable d'environnement OPENAI_API_KEY est obligatoire.",
         )
-    return GitHubModelsClient(api_key=token, base_url=GITHUB_MODELS_BASE_URL)
+    return OpenAIClient(api_key=token, base_url=OPENAI_BASE_URL)
 
 
-def get_llm_config(api_token: str, model_level: str) -> tuple[GitHubModelsClient, str]:
-    model = MODEL_LEVELS.get(model_level, GITHUB_MODELS_MEDIUM_MODEL)
-    return get_github_models_client(api_token), model
+def get_llm_config(model_level: str) -> tuple[OpenAIClient, str, str | None]:
+    model = MODEL_LEVELS.get(model_level, OPENAI_MEDIUM_MODEL)
+    reasoning_effort = None
+    if model_level == "medium" and (model == "gpt-5.6" or model.startswith("gpt-5.6-")):
+        reasoning_effort = "none"
+    return get_openai_client(), model, reasoning_effort
 
 
-def get_embedding_config(api_token: str) -> tuple[GitHubModelsClient, str]:
-    return get_github_models_client(api_token), GITHUB_MODELS_EMBEDDING_MODEL
+def get_embedding_config() -> tuple[OpenAIClient, str]:
+    return get_openai_client(), OPENAI_EMBEDDING_MODEL
 
 
-def get_embedding_vectors(client: GitHubModelsClient, model: str, texts: list[str]) -> list[list[float]]:
+def summarize_openai_usage(
+    model: str,
+    usage: dict[str, object],
+    *,
+    embedding: bool = False,
+) -> dict[str, object]:
+    prompt_tokens = int(usage.get("prompt_tokens") or 0)
+    completion_tokens = int(usage.get("completion_tokens") or 0)
+    prompt_details = usage.get("prompt_tokens_details")
+    cached_tokens = (
+        int(prompt_details.get("cached_tokens") or 0)
+        if isinstance(prompt_details, dict)
+        else 0
+    )
+    pricing = OPENAI_PRICING_USD_PER_MILLION.get(model)
+    estimated_cost_usd = None
+    if pricing is not None:
+        uncached_tokens = max(prompt_tokens - cached_tokens, 0)
+        input_cost = (
+            (uncached_tokens * pricing["input"])
+            + (cached_tokens * pricing["cached_input"])
+        ) / 1_000_000
+        output_cost = 0.0 if embedding else (completion_tokens * pricing["output"]) / 1_000_000
+        estimated_cost_usd = input_cost + output_cost
+    return {
+        "estimated_cost_usd": estimated_cost_usd,
+        "total_tokens": int(usage.get("total_tokens") or (prompt_tokens + completion_tokens)),
+        "api_calls": 1,
+        "fully_priced": estimated_cost_usd is not None,
+    }
+
+
+def merge_openai_usage(*summaries: dict[str, object]) -> dict[str, object]:
+    priced_costs = [
+        float(summary["estimated_cost_usd"])
+        for summary in summaries
+        if summary.get("estimated_cost_usd") is not None
+    ]
+    return {
+        "estimated_cost_usd": sum(priced_costs),
+        "total_tokens": sum(int(summary.get("total_tokens") or 0) for summary in summaries),
+        "api_calls": sum(int(summary.get("api_calls") or 0) for summary in summaries),
+        "fully_priced": all(bool(summary.get("fully_priced", True)) for summary in summaries),
+    }
+
+
+def get_embedding_vectors(
+    client: OpenAIClient,
+    model: str,
+    texts: list[str],
+) -> tuple[list[list[float]], dict[str, object]]:
     if not texts:
-        return []
+        return [], merge_openai_usage()
 
     response = client.embeddings.create(model=model, input=texts)
-    return [item.embedding for item in response.data]
+    return (
+        [item.embedding for item in response.data],
+        summarize_openai_usage(response.model, response.usage, embedding=True),
+    )
 
 
 def normalize_vector(vector: list[float]) -> list[float]:
@@ -355,23 +474,254 @@ def chunk_text(text: str) -> list[str]:
     return chunks
 
 
-async def read_project_document(file: UploadFile, max_chars: int) -> tuple[str, str]:
+async def read_project_document(file: UploadFile, max_chars: int) -> tuple[str, str, bytes]:
     filename = file.filename or "document"
     lowered = filename.lower()
+    file.file.seek(0)
+    raw_content = await file.read()
 
     if lowered.endswith(".pdf"):
-        file.file.seek(0)
-        return filename, extract_pdf_text(file, max_chars)
+        try:
+            from io import BytesIO
+
+            reader = PdfReader(BytesIO(raw_content))
+            pages = [(page.extract_text() or "").strip() for page in reader.pages]
+            text = "\n\n".join(page for page in pages if page)[:max_chars]
+        except Exception as exc:
+            raise HTTPException(status_code=400, detail="PDF illisible ou invalide.") from exc
+        return filename, text, raw_content
     if lowered.endswith((".md", ".markdown")):
-        raw_content = await file.read()
-        return filename, raw_content.decode("utf-8", errors="replace")[:max_chars]
-    return filename, ""
+        return filename, raw_content.decode("utf-8", errors="replace")[:max_chars], raw_content
+    return filename, "", raw_content
+
+
+def get_persisted_session_dir(session_id: str) -> Path:
+    if not isinstance(session_id, str) or not re.fullmatch(r"[a-z0-9][a-z0-9-]{0,119}", session_id):
+        raise HTTPException(status_code=400, detail="Identifiant de sauvegarde invalide.")
+    return SESSION_DATA_DIR / session_id
+
+
+def build_saved_session_label(topic: str) -> str:
+    normalized = unicodedata.normalize("NFKD", topic).encode("ascii", "ignore").decode("ascii")
+    ignored_words = {
+        "nous", "souhaitons", "souhaite", "ajouter", "ajout", "dans", "depuis", "avec",
+        "pour", "afin", "que", "les", "des", "une", "un", "notre", "leur", "leurs",
+        "permettant", "permettre", "vers", "fonctionnalite", "disposer", "correction",
+        "evolution", "rapidement", "idealement", "avoir", "etre", "devra", "devrait",
+        "application", "ecran", "interface", "page", "systeme",
+    }
+    raw_words = re.findall(r"[a-z0-9]+", normalized.lower())
+    words = []
+    quoted_words = [
+        word
+        for quoted_text in re.findall(r'["“”]([^"“”]+)["“”]', topic)
+        for word in re.findall(
+            r"[a-z0-9]+",
+            unicodedata.normalize("NFKD", quoted_text)
+            .encode("ascii", "ignore")
+            .decode("ascii")
+            .lower(),
+        )
+    ]
+    for word in quoted_words + raw_words:
+        if word in ignored_words or word in words or len(word) < 3:
+            continue
+        words.append(word)
+    return " ".join(words[:4]).capitalize() or "Discussion CODEV"
+
+
+def sanitize_saved_session_label(label: str, fallback_topic: str) -> str:
+    words = re.findall(r"[\w'-]+", re.sub(r"\s+", " ", label).strip(), re.UNICODE)[:5]
+    return " ".join(words).strip(" -'") or build_saved_session_label(fallback_topic)
+
+
+def generate_saved_session_label(topic: str) -> tuple[str, dict[str, object]]:
+    client = get_openai_client()
+    response = client.chat.completions.create(
+        model=OPENAI_LIGHT_MODEL,
+        messages=[
+            {
+                "role": "system",
+                "content": (
+                    "Tu nommes des sessions de cadrage logiciel. Produis un titre metier distinctif "
+                    "de 3 a 5 mots, directement deduit de la description. Garde les noms de modules, "
+                    "objets metier et actions importantes. Evite les termes generiques comme projet, "
+                    "besoin, evolution ou fonctionnalite. N'invente aucune information."
+                ),
+            },
+            {"role": "user", "content": topic},
+        ],
+        response_format={
+            "type": "json_schema",
+            "json_schema": {
+                "name": "saved_session_title",
+                "strict": True,
+                "schema": {
+                    "type": "object",
+                    "properties": {"title": {"type": "string"}},
+                    "required": ["title"],
+                    "additionalProperties": False,
+                },
+            },
+        },
+    )
+    try:
+        content = response.choices[0].message.content or "{}"
+        raw_label = str(json.loads(content).get("title") or "")
+    except (IndexError, AttributeError, json.JSONDecodeError) as exc:
+        raise OpenAIError("Titre de sauvegarde OpenAI invalide.") from exc
+    return (
+        sanitize_saved_session_label(raw_label, topic),
+        summarize_openai_usage(response.model, response.usage),
+    )
+
+
+def build_saved_session_id(label: str) -> str:
+    normalized = unicodedata.normalize("NFKD", label).encode("ascii", "ignore").decode("ascii")
+    slug = re.sub(r"[^a-z0-9]+", "-", normalized.lower()).strip("-")[:50]
+    now = datetime.now(timezone.utc)
+    timestamp = now.strftime("%Y%m%d-%H%M%S-%f")
+    return f"{slug or 'discussion-codev'}-{timestamp}"
+
+
+def persist_document_session(
+    session: DocumentSession,
+    source_files: list[tuple[str, bytes]],
+) -> None:
+    session_dir = get_persisted_session_dir(session.session_id)
+    documents_dir = session_dir / "documents"
+    documents_dir.mkdir(parents=True, exist_ok=False)
+
+    documents = []
+    for source_name, raw_content in source_files:
+        suffix = Path(source_name).suffix.lower()
+        if suffix not in {".pdf", ".md", ".markdown"}:
+            suffix = ".bin"
+        stored_name = f"{uuid.uuid4()}{suffix}"
+        (documents_dir / stored_name).write_bytes(raw_content)
+        documents.append({"original_name": source_name, "stored_name": stored_name})
+
+    index_data = {
+        "version": DOCUMENT_INDEX_VERSION,
+        "session_id": session.session_id,
+        "embedding_model": session.embedding_model,
+        "vector_dimension": len(session.chunks[0].vector) if session.chunks else 0,
+        "source_count": session.source_count,
+        "documents": documents,
+        "chunks": [
+            {
+                "source": chunk.source,
+                "text": chunk.text,
+                "vector": chunk.vector,
+            }
+            for chunk in session.chunks
+        ],
+    }
+    (session_dir / "index.json").write_text(
+        json.dumps(index_data, ensure_ascii=False),
+        encoding="utf-8",
+    )
+
+
+def load_persisted_document_session(
+    session_id: str,
+) -> tuple[DocumentSession, dict[str, object]]:
+    session_dir = get_persisted_session_dir(session_id)
+    index_path = session_dir / "index.json"
+    if not index_path.is_file():
+        raise HTTPException(status_code=404, detail="Sauvegarde documentaire introuvable.")
+
+    try:
+        index_data = json.loads(index_path.read_text(encoding="utf-8"))
+        if index_data.get("version") != DOCUMENT_INDEX_VERSION:
+            raise ValueError("version incompatible")
+        raw_chunks = index_data.get("chunks")
+        if not isinstance(raw_chunks, list) or not raw_chunks:
+            raise ValueError("index vide")
+        sources = [str(item["source"]) for item in raw_chunks]
+        texts = [str(item["text"]) for item in raw_chunks]
+        vectors = [[float(value) for value in item["vector"]] for item in raw_chunks]
+    except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail="Index documentaire sauvegarde invalide.") from exc
+
+    embedding_usage = merge_openai_usage()
+    saved_model = str(index_data.get("embedding_model") or "")
+    rebuilt_embeddings = False
+    if saved_model != OPENAI_EMBEDDING_MODEL:
+        client, embedding_model = get_embedding_config()
+        try:
+            raw_vectors, embedding_usage = get_embedding_vectors(
+                client,
+                embedding_model,
+                [f"{source}\n{text}" for source, text in zip(sources, texts)],
+            )
+            vectors = [normalize_vector(vector) for vector in raw_vectors]
+            saved_model = embedding_model
+            rebuilt_embeddings = True
+        except Exception as exc:
+            raise HTTPException(
+                status_code=409,
+                detail=f"Impossible de reconstruire l'index documentaire: {exc}",
+            ) from exc
+
+    if len(vectors) != len(texts) or not vectors or any(not vector for vector in vectors):
+        raise HTTPException(status_code=409, detail="Embeddings documentaires sauvegardes invalides.")
+    vector_dimension = len(vectors[0])
+    if any(len(vector) != vector_dimension for vector in vectors):
+        raise HTTPException(status_code=409, detail="Dimensions d'embeddings incompatibles.")
+
+    if rebuilt_embeddings:
+        index_data["embedding_model"] = saved_model
+        index_data["vector_dimension"] = vector_dimension
+        for raw_chunk, vector in zip(raw_chunks, vectors):
+            raw_chunk["vector"] = vector
+        try:
+            index_path.write_text(
+                json.dumps(index_data, ensure_ascii=False),
+                encoding="utf-8",
+            )
+        except OSError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Impossible de mettre a jour l'index documentaire sauvegarde.",
+            ) from exc
+
+    chunks = [
+        DocumentChunk(
+            source=source,
+            text=text,
+            terms=Counter(tokenize(f"{source}\n{text}")),
+            vector=vector,
+        )
+        for source, text, vector in zip(sources, texts, vectors)
+    ]
+    vector_index, retrieval_mode = build_optional_turbovec_index(vectors)
+    stored_source_files = []
+    for document in index_data.get("documents") or []:
+        try:
+            stored_name = str(document["stored_name"])
+            if not re.fullmatch(r"[a-f0-9-]+\.(?:pdf|md|markdown|bin)", stored_name):
+                continue
+            raw_content = (session_dir / "documents" / stored_name).read_bytes()
+            stored_source_files.append((str(document["original_name"]), raw_content))
+        except (KeyError, OSError, TypeError):
+            continue
+    session = DocumentSession(
+        session_id=session_id,
+        chunks=chunks,
+        source_count=int(index_data.get("source_count") or len(set(sources))),
+        retrieval_mode=retrieval_mode,
+        embedding_model=saved_model,
+        source_files=stored_source_files,
+        vector_index=vector_index,
+    )
+    DOCUMENT_SESSIONS[session_id] = session
+    return session, embedding_usage
 
 
 async def build_document_session(
     files: list[UploadFile] | None,
-    api_token: str,
-) -> DocumentSession:
+) -> tuple[DocumentSession, dict[str, object]]:
     if not files:
         raise HTTPException(status_code=400, detail="Aucune documentation projet fournie.")
 
@@ -379,18 +729,20 @@ async def build_document_session(
     chunk_texts: list[str] = []
     chunk_terms: list[Counter[str]] = []
     source_names: set[str] = set()
+    source_files: list[tuple[str, bytes]] = []
     remaining_chars = MAX_DOCUMENT_SESSION_CHARS
 
     for file in files:
         if remaining_chars <= 0:
             break
 
-        source, text = await read_project_document(file, remaining_chars)
+        source, text, raw_content = await read_project_document(file, remaining_chars)
         text = text.strip()
         if not text:
             continue
 
         source_names.add(source)
+        source_files.append((source, raw_content))
         remaining_chars -= len(text)
         for chunk in chunk_text(text):
             terms = Counter(tokenize(f"{source}\n{chunk}"))
@@ -405,9 +757,9 @@ async def build_document_session(
             detail="Aucun contenu exploitable trouve dans la documentation projet.",
         )
 
-    client, embedding_model = get_embedding_config(api_token)
+    client, embedding_model = get_embedding_config()
     try:
-        raw_vectors = get_embedding_vectors(
+        raw_vectors, embedding_usage = get_embedding_vectors(
             client,
             embedding_model,
             [f"{source}\n{text}" for source, text in zip(chunk_sources, chunk_texts)],
@@ -437,10 +789,12 @@ async def build_document_session(
         chunks=chunks,
         source_count=len(source_names),
         retrieval_mode=retrieval_mode,
+        embedding_model=embedding_model,
+        source_files=source_files,
         vector_index=vector_index,
     )
     DOCUMENT_SESSIONS[session_id] = session
-    return session
+    return session, embedding_usage
 
 
 def score_lexical_chunks(session: DocumentSession, query_terms: Counter[str]) -> dict[int, float]:
@@ -491,25 +845,31 @@ def score_vector_chunks(
 def retrieve_project_context(
     document_session_id: str,
     query: str,
-    api_token: str,
-) -> str:
+) -> tuple[str, dict[str, object]]:
     if not document_session_id:
-        return ""
+        return "", merge_openai_usage()
 
     session = DOCUMENT_SESSIONS.get(document_session_id)
+    restoration_usage = merge_openai_usage()
     if session is None:
-        raise HTTPException(
-            status_code=400,
-            detail="Session documentaire inconnue. Rechargez la documentation projet.",
-        )
+        try:
+            session, restoration_usage = load_persisted_document_session(document_session_id)
+        except HTTPException as exc:
+            raise HTTPException(
+                status_code=409,
+                detail="Session documentaire inconnue. Rechargez la documentation projet.",
+            ) from exc
 
     query_terms = Counter(tokenize(query))
     if not query_terms:
         selected_chunks = session.chunks[: min(MAX_RETRIEVED_DOCUMENT_CHUNKS, len(session.chunks))]
+        embedding_usage = restoration_usage
     else:
-        client, embedding_model = get_embedding_config(api_token)
+        client, embedding_model = get_embedding_config()
         try:
-            query_vector = normalize_vector(get_embedding_vectors(client, embedding_model, [query])[0])
+            query_vectors, query_usage = get_embedding_vectors(client, embedding_model, [query])
+            embedding_usage = merge_openai_usage(restoration_usage, query_usage)
+            query_vector = normalize_vector(query_vectors[0])
         except Exception as exc:
             raise HTTPException(
                 status_code=400,
@@ -537,7 +897,7 @@ def retrieve_project_context(
         f"Source: {chunk.source}\n{chunk.text}"
         for chunk in selected_chunks
     ]
-    return "\n\n---\n\n".join(sections)
+    return "\n\n---\n\n".join(sections), embedding_usage
 
 
 def get_client_profile(profile: str) -> dict[str, str]:
@@ -570,7 +930,7 @@ def build_project_context(project_document_text: str) -> str:
     return "\n\nAucune documentation projet n'a ete fournie."
 
 
-def parse_validated_decisions(raw_decisions: str) -> list[str]:
+def parse_validated_decisions(raw_decisions: str) -> list[dict[str, str]]:
     if not raw_decisions:
         return []
     try:
@@ -581,19 +941,181 @@ def parse_validated_decisions(raw_decisions: str) -> list[str]:
         return []
     decisions = []
     for decision in parsed_decisions:
-        text = re.sub(r"\s+", " ", str(decision)).strip()
+        if isinstance(decision, dict):
+            text = re.sub(r"\s+", " ", str(decision.get("text") or "")).strip()
+            evidence = re.sub(r"\s+", " ", str(decision.get("evidence") or "")).strip()
+            source = str(decision.get("source") or "client")
+            profile = str(decision.get("profile") or "sales")
+        else:
+            text = re.sub(r"\s+", " ", str(decision)).strip()
+            evidence = ""
+            source = "client"
+            profile = "sales"
         if text:
-            decisions.append(text)
-    return decisions[:20]
+            decisions.append({"text": text, "evidence": evidence, "source": source, "profile": profile})
+    return decisions[:100]
+
+
+def parse_negotiation_response(content: str, profile: str) -> tuple[str, list[dict[str, str]]]:
+    try:
+        parsed = json.loads(content)
+    except json.JSONDecodeError:
+        return content.strip(), []
+
+    if not isinstance(parsed, dict):
+        return content.strip(), []
+
+    reply = str(parsed.get("reply") or "").strip()
+    decisions = []
+    for field, source in [
+        ("project_decisions", "document"),
+        ("client_decisions", "client"),
+        ("codev_user_decisions", "codev_user"),
+    ]:
+        raw_decisions = parsed.get(field)
+        if not isinstance(raw_decisions, list):
+            continue
+        for decision in raw_decisions:
+            if not isinstance(decision, dict):
+                continue
+            text = re.sub(r"\s+", " ", str(decision.get("text") or "")).strip()
+            evidence = re.sub(r"\s+", " ", str(decision.get("evidence") or "")).strip()
+            if text:
+                decisions.append({
+                    "text": text,
+                    "evidence": evidence[:500],
+                    "source": source,
+                    "profile": profile,
+                })
+    return reply, decisions[:12]
+
+
+def normalize_decision_comparison_text(value: str) -> str:
+    normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
+    return re.sub(r"[^a-z0-9]+", " ", normalized.lower()).strip()
+
+
+def decision_texts_are_similar(left: str, right: str) -> bool:
+    left_normalized = normalize_decision_comparison_text(left)
+    right_normalized = normalize_decision_comparison_text(right)
+    if not left_normalized or not right_normalized:
+        return False
+    if left_normalized == right_normalized:
+        return True
+    if min(len(left_normalized), len(right_normalized)) >= 24 and (
+        left_normalized in right_normalized or right_normalized in left_normalized
+    ):
+        return True
+    left_tokens = set(left_normalized.split())
+    right_tokens = set(right_normalized.split())
+    overlap = len(left_tokens & right_tokens)
+    containment = overlap / max(min(len(left_tokens), len(right_tokens)), 1)
+    return containment >= 0.72 or SequenceMatcher(None, left_normalized, right_normalized).ratio() >= 0.82
+
+
+def filter_new_validated_decisions(
+    existing: list[dict[str, str]],
+    candidates: list[dict[str, str]],
+) -> list[dict[str, str]]:
+    accepted: list[dict[str, str]] = []
+    for candidate in candidates:
+        comparisons = existing + accepted
+        duplicate = any(
+            candidate["source"] == known["source"]
+            and (
+                decision_texts_are_similar(candidate["text"], known["text"])
+                or (
+                    candidate.get("evidence")
+                    and known.get("evidence")
+                    and decision_texts_are_similar(candidate["evidence"], known["evidence"])
+                )
+            )
+            for known in comparisons
+        )
+        if not duplicate:
+            accepted.append(candidate)
+    return accepted
+
+
+def evidence_is_in_text(evidence: str, source_text: str) -> bool:
+    evidence_normalized = normalize_decision_comparison_text(evidence)
+    source_normalized = normalize_decision_comparison_text(source_text)
+    return bool(evidence_normalized and source_normalized and evidence_normalized in source_normalized)
+
+
+def evidence_supports_decision(decision: str, evidence: str) -> bool:
+    ignored = {
+        "afin", "avec", "dans", "des", "doit", "du", "elle", "export", "contrat",
+        "contrats", "les", "pour", "que", "qui", "sera", "sont", "une",
+    }
+    decision_tokens = set(normalize_decision_comparison_text(decision).split()) - ignored
+    evidence_tokens = set(normalize_decision_comparison_text(evidence).split()) - ignored
+    overlap = len(decision_tokens & evidence_tokens)
+    containment = overlap / max(min(len(decision_tokens), len(evidence_tokens)), 1)
+    return (overlap >= 2 and containment >= 0.40) or (overlap >= 3 and containment >= 0.25)
+
+
+def find_supporting_excerpt(decision: str, source_text: str) -> str:
+    excerpts = [
+        excerpt.strip()
+        for excerpt in re.split(r"(?<=[.!?])\s+|\n+", source_text)
+        if excerpt.strip()
+    ]
+    supported = [excerpt for excerpt in excerpts if evidence_supports_decision(decision, excerpt)]
+    if not supported:
+        return ""
+    return max(
+        supported,
+        key=lambda excerpt: SequenceMatcher(
+            None,
+            normalize_decision_comparison_text(decision),
+            normalize_decision_comparison_text(excerpt),
+        ).ratio(),
+    )[:500]
+
+
+def validate_and_classify_decision_sources(
+    candidates: list[dict[str, str]],
+    document_text: str,
+    codev_user_text: str,
+    client_reply: str,
+) -> list[dict[str, str]]:
+    validated = []
+    source_texts = {
+        "document": document_text,
+        "codev_user": codev_user_text,
+        "client": client_reply,
+    }
+    for candidate in candidates:
+        evidence = candidate.get("evidence") or ""
+        declared_source_text = source_texts.get(candidate["source"], "")
+        evidence_is_valid = (
+            evidence_is_in_text(evidence, declared_source_text)
+            and evidence_supports_decision(candidate["text"], evidence)
+        )
+        if not evidence_is_valid:
+            if candidate["source"] == "document":
+                continue
+            repaired_evidence = find_supporting_excerpt(candidate["text"], declared_source_text)
+            if not repaired_evidence:
+                continue
+            candidate = dict(candidate)
+            candidate["evidence"] = repaired_evidence
+        validated.append(candidate)
+    return validated
 
 
 def append_validated_decisions_context(
     project_document_text: str,
-    validated_decisions: list[str],
+    validated_decisions: list[dict[str, str]],
 ) -> str:
     if not validated_decisions:
         return project_document_text
-    decisions_text = "\n".join(f"- {decision}" for decision in validated_decisions)
+    decisions_text = "\n".join(
+        f"- [{decision['source']}/{decision['profile']}] {decision['text']}"
+        + (f" | preuve: {decision['evidence']}" if decision.get("evidence") else "")
+        for decision in validated_decisions
+    )
     return "\n\n".join(
         section
         for section in [
@@ -704,6 +1226,25 @@ def parse_report_response(content: str) -> dict[str, object]:
 
     if not isinstance(parsed, dict):
         raise HTTPException(status_code=502, detail="Rapport IA invalide.")
+
+    scores = parsed.get("scores")
+    if isinstance(scores, list):
+        normalized_scores = []
+        for item in scores:
+            if not isinstance(item, dict):
+                continue
+            normalized_item = dict(item)
+            try:
+                score = int(normalized_item.get("score") or 0)
+            except (TypeError, ValueError):
+                score = 0
+            normalized_item["score"] = max(0, min(score, 100))
+            normalized_scores.append(normalized_item)
+        parsed["scores"] = normalized_scores
+        weakest_scores = sorted(item["score"] for item in normalized_scores)[:3]
+        parsed["global_score"] = (
+            round(sum(weakest_scores) / len(weakest_scores)) if weakest_scores else 0
+        )
     return parsed
 
 
@@ -767,18 +1308,184 @@ def index() -> FileResponse:
     return FileResponse("static/index.html")
 
 
+@app.get("/favicon.ico", include_in_schema=False)
+def favicon() -> FileResponse:
+    return FileResponse("static/favicon.svg", media_type="image/svg+xml")
+
+
 @app.post("/api/document-session")
 async def create_document_session(
-    api_token: Annotated[str, Form()] = "",
     project_docs: Annotated[list[UploadFile] | None, File()] = None,
 ) -> dict[str, object]:
-    session = await build_document_session(project_docs, api_token)
+    session, openai_usage = await build_document_session(project_docs)
     return {
         "document_session_id": session.session_id,
         "chunks": len(session.chunks),
         "sources": session.source_count,
         "retrieval_mode": session.retrieval_mode,
+        "openai_usage": openai_usage,
     }
+
+
+@app.post("/api/document-session/restore")
+async def restore_document_session(
+    document_session_id: Annotated[str, Form()],
+) -> dict[str, object]:
+    session = DOCUMENT_SESSIONS.get(document_session_id)
+    openai_usage = merge_openai_usage()
+    if session is None:
+        session, openai_usage = load_persisted_document_session(document_session_id)
+    return {
+        "document_session_id": session.session_id,
+        "chunks": len(session.chunks),
+        "sources": session.source_count,
+        "retrieval_mode": session.retrieval_mode,
+        "openai_usage": openai_usage,
+    }
+
+
+@app.get("/api/saved-sessions")
+def list_saved_sessions() -> dict[str, object]:
+    sessions = []
+    if SESSION_DATA_DIR.is_dir():
+        for session_path in SESSION_DATA_DIR.iterdir():
+            metadata_path = session_path / "session.json"
+            if not session_path.is_dir() or not metadata_path.is_file():
+                continue
+            try:
+                data = json.loads(metadata_path.read_text(encoding="utf-8"))
+                topic = str(data.get("topic") or "Discussion CODEV")
+                sessions.append({
+                    "id": session_path.name,
+                    "name": str(data.get("display_name") or build_saved_session_label(topic)),
+                    "saved_at": str(data.get("saved_at") or ""),
+                    "has_report": isinstance(data.get("report"), dict),
+                })
+            except (OSError, json.JSONDecodeError):
+                continue
+    sessions.sort(key=lambda item: item["saved_at"], reverse=True)
+    return {"sessions": sessions}
+
+
+@app.post("/api/saved-sessions")
+def save_discussion_session(payload: Annotated[dict[str, object], Body()]) -> dict[str, object]:
+    history = payload.get("history")
+    if not isinstance(history, list) or not history:
+        raise HTTPException(status_code=400, detail="La discussion est vide.")
+
+    topic = str(payload.get("topic") or "Discussion CODEV").strip()
+    existing_display_name = str(payload.get("display_name") or "").strip()
+    if existing_display_name:
+        display_name = sanitize_saved_session_label(existing_display_name, topic)
+        naming_usage = merge_openai_usage()
+    else:
+        try:
+            display_name, naming_usage = generate_saved_session_label(topic)
+        except OpenAIError as exc:
+            raise HTTPException(status_code=502, detail=f"Nom de sauvegarde impossible: {exc}") from exc
+    saved_session_id = build_saved_session_id(display_name)
+    saved_path = get_persisted_session_dir(saved_session_id)
+    document_session_id = str(payload.get("document_session_id") or "")
+    document_session = DOCUMENT_SESSIONS.get(document_session_id)
+    if document_session is None and document_session_id:
+        try:
+            document_session, _ = load_persisted_document_session(document_session_id)
+        except HTTPException:
+            document_session = None
+
+    try:
+        if document_session is not None:
+            persisted_session = DocumentSession(
+                session_id=saved_session_id,
+                chunks=document_session.chunks,
+                source_count=document_session.source_count,
+                retrieval_mode=document_session.retrieval_mode,
+                embedding_model=document_session.embedding_model,
+                source_files=document_session.source_files,
+                vector_index=document_session.vector_index,
+            )
+            persist_document_session(persisted_session, persisted_session.source_files)
+            DOCUMENT_SESSIONS[saved_session_id] = persisted_session
+            payload["document_session_id"] = saved_session_id
+        else:
+            saved_path.mkdir(parents=True, exist_ok=False)
+            payload["document_session_id"] = ""
+
+        payload["format"] = "codev-session"
+        payload["version"] = 1
+        payload["saved_at"] = datetime.now(timezone.utc).isoformat()
+        payload["storage_id"] = saved_session_id
+        payload["display_name"] = display_name
+        previous_usage = payload.get("openai_usage")
+        payload["openai_usage"] = merge_openai_usage(
+            previous_usage if isinstance(previous_usage, dict) else merge_openai_usage(),
+            naming_usage,
+        )
+        (saved_path / "session.json").write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except OSError as exc:
+        raise HTTPException(status_code=500, detail=f"Sauvegarde impossible: {exc}") from exc
+
+    return {
+        "id": saved_session_id,
+        "display_name": display_name,
+        "saved_at": payload["saved_at"],
+        "openai_usage": naming_usage,
+    }
+
+
+@app.get("/api/saved-sessions/{saved_session_id}")
+def load_discussion_session(saved_session_id: str) -> dict[str, object]:
+    saved_path = get_persisted_session_dir(saved_session_id)
+    session_path = saved_path / "session.json"
+    if not session_path.is_file():
+        raise HTTPException(status_code=404, detail="Sauvegarde introuvable.")
+    try:
+        data = json.loads(session_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise HTTPException(status_code=409, detail="Sauvegarde illisible.") from exc
+    if not isinstance(data, dict):
+        raise HTTPException(status_code=409, detail="Sauvegarde invalide.")
+
+    document_text = ""
+    index_path = saved_path / "index.json"
+    if index_path.is_file():
+        try:
+            index_data = json.loads(index_path.read_text(encoding="utf-8"))
+            document_text = "\n".join(
+                str(chunk.get("text") or "")
+                for chunk in index_data.get("chunks") or []
+                if isinstance(chunk, dict)
+            )
+        except (OSError, json.JSONDecodeError):
+            pass
+    history = data.get("history") if isinstance(data.get("history"), list) else []
+    codev_text = "\n".join(
+        [str(data.get("topic") or "")]
+        + [
+            str(item.get("content") or "")
+            for item in history
+            if isinstance(item, dict) and item.get("role") == "user"
+        ]
+    )
+    client_text = "\n".join(
+        str(item.get("content") or "")
+        for item in history
+        if isinstance(item, dict) and item.get("role") == "assistant"
+    )
+    decisions = parse_validated_decisions(
+        json.dumps(data.get("validated_decisions") or [], ensure_ascii=False)
+    )
+    decisions = validate_and_classify_decision_sources(
+        decisions,
+        document_text,
+        codev_text,
+        client_text,
+    )
+    data["validated_decisions"] = filter_new_validated_decisions([], decisions)
+    return data
 
 
 @app.post("/api/elevenlabs/voices")
@@ -843,7 +1550,6 @@ async def negotiate(
     argument: Annotated[str, Form()] = "",
     profile: Annotated[str, Form()] = "sales",
     model_level: Annotated[str, Form()] = "medium",
-    api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
@@ -875,16 +1581,17 @@ async def negotiate(
             ],
         ]
     )
-    project_document_text = retrieve_project_context(
+    project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
-        api_token,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
+    document_evidence_text = project_document_text
+    existing_decisions = parse_validated_decisions(validated_decisions)
     project_document_text = append_validated_decisions_context(
         project_document_text,
-        parse_validated_decisions(validated_decisions),
+        existing_decisions,
     )
 
     messages = [
@@ -911,16 +1618,32 @@ async def negotiate(
     else:
         messages.append({"role": "user", "content": build_opening_prompt()})
 
-    client, model = get_llm_config(api_token, model_level)
+    client, model, reasoning_effort = get_llm_config(model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.7,
+        response_format=NEGOTIATION_RESPONSE_FORMAT,
+        reasoning_effort=reasoning_effort,
     )
 
     content = response.choices[0].message.content or ""
+    reply, new_decisions = parse_negotiation_response(content, profile)
+    new_decisions = validate_and_classify_decision_sources(
+        new_decisions,
+        document_evidence_text,
+        "\n".join(part for part in [topic.strip(), argument.strip()] if part),
+        reply,
+    )
+    new_decisions = filter_new_validated_decisions(existing_decisions, new_decisions)
+    if not reply:
+        raise HTTPException(status_code=502, detail="Reponse de negociation OpenAI invalide.")
     return {
-        "reply": content.strip(),
+        "reply": reply,
+        "validated_decisions": new_decisions,
+        "openai_usage": merge_openai_usage(
+            embedding_usage,
+            summarize_openai_usage(response.model, response.usage),
+        ),
     }
 
 
@@ -930,7 +1653,6 @@ async def help_answer(
     argument: Annotated[str, Form()] = "",
     profile: Annotated[str, Form()] = "sales",
     model_level: Annotated[str, Form()] = "medium",
-    api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
@@ -964,10 +1686,9 @@ async def help_answer(
             ],
         ]
     )
-    project_document_text = retrieve_project_context(
+    project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
-        api_token,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
@@ -1008,16 +1729,20 @@ async def help_answer(
         }
     )
 
-    client, model = get_llm_config(api_token, model_level)
+    client, model, reasoning_effort = get_llm_config(model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.5,
+        reasoning_effort=reasoning_effort,
     )
 
     content = response.choices[0].message.content or ""
     return {
         "reply": content.strip(),
+        "openai_usage": merge_openai_usage(
+            embedding_usage,
+            summarize_openai_usage(response.model, response.usage),
+        ),
     }
 
 
@@ -1026,7 +1751,6 @@ async def framing_report(
     topic: Annotated[str, Form()],
     profile: Annotated[str, Form()] = "sales",
     model_level: Annotated[str, Form()] = "medium",
-    api_token: Annotated[str, Form()] = "",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
     document_session_id: Annotated[str, Form()] = "",
@@ -1057,10 +1781,9 @@ async def framing_report(
             ],
         ]
     )
-    project_document_text = retrieve_project_context(
+    project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
-        api_token,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
@@ -1099,15 +1822,18 @@ Important:
 - Les reponses du developpeur et les validations du client doivent etre prises en compte comme des clarifications.
 - Si un point etait manquant dans la demande initiale mais a ete precise dans la discussion, ne le compte plus comme manquant.
 - Liste ce point dans `clarified_points` et ajuste le score de l'axe concerne a la hausse.
+- Applique strictement le bareme conservateur du prompt et justifie chaque score uniquement par des preuves explicites.
+- Une question ou une suggestion non validee n'est jamais un point clarifie.
+- Ne transforme pas une exigence fonctionnelle en preuve UX, securite, performance ou exploitabilite si cet aspect n'a pas ete discute.
 """.strip(),
         }
     )
 
-    client, model = get_llm_config(api_token, model_level)
+    client, model, reasoning_effort = get_llm_config(model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
-        temperature=0.2,
+        reasoning_effort=reasoning_effort,
     )
 
     content = response.choices[0].message.content or ""
@@ -1115,6 +1841,10 @@ Important:
     return {
         "report": report,
         "markdown": build_report_markdown(report),
+        "openai_usage": merge_openai_usage(
+            embedding_usage,
+            summarize_openai_usage(response.model, response.usage),
+        ),
     }
 
 
@@ -1122,7 +1852,6 @@ Important:
 async def improve_report(
     report: Annotated[str, Form()],
     model_level: Annotated[str, Form()] = "medium",
-    api_token: Annotated[str, Form()] = "",
 ) -> dict[str, object]:
     try:
         parsed_report = json.loads(report)
@@ -1149,14 +1878,14 @@ async def improve_report(
             detail="Prompt d'amelioration du rapport invalide.",
         ) from exc
 
-    client, model = get_llm_config(api_token, model_level)
+    client, model, reasoning_effort = get_llm_config(model_level)
     try:
         response = client.chat.completions.create(
             model=model,
             messages=messages,
-            temperature=0.2,
+            reasoning_effort=reasoning_effort,
         )
-    except GitHubModelsError as exc:
+    except OpenAIError as exc:
         raise HTTPException(status_code=502, detail=f"Erreur du fournisseur LLM: {exc}") from exc
     except Exception as exc:
         raise HTTPException(
@@ -1172,4 +1901,5 @@ async def improve_report(
 
     return {
         "improvement": improvement,
+        "openai_usage": summarize_openai_usage(response.model, response.usage),
     }
