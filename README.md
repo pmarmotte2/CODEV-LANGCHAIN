@@ -47,7 +47,7 @@ CODEV peut alors faire emerger des questions comme:
 - Rapport de cadrage telechargeable en HTML, imprimable en PDF depuis le navigateur.
 - Analyse du rapport pour expliquer les actions qui feraient progresser le score de maturite.
 
-Le fournisseur LLM est selectionne dans l'interface entre OpenAI et Ollama local. Les secrets sont lus cote serveur depuis les variables d'environnement et ne sont jamais demandes dans l'interface.
+Le fournisseur LLM est selectionne dans l'interface entre OpenAI, Anthropic, Google Gemini, Azure OpenAI et Ollama local. Les secrets sont lus cote serveur depuis les variables d'environnement et ne sont jamais demandes dans l'interface.
 
 La documentation projet peut etre fournie sous forme de PDF, de fichiers Markdown, ou d'un dossier wiki Markdown.
 Elle est indexee une fois dans une session documentaire locale, puis seuls les extraits utiles sont injectes dans les prompts.
@@ -84,7 +84,8 @@ LangChain et LangGraph n'ajoutent aucun abonnement ni cout d'API. CODEV effectue
 
 La session documentaire utilise une recherche hybride:
 
-- embeddings `text-embedding-3-small` via OpenAI ou `nomic-embed-text` via Ollama
+- embeddings du fournisseur pour OpenAI, Google, Azure et Ollama
+- index vectoriel local deterministe pour Anthropic, qui ne propose pas d'API d'embeddings native
 - score lexical local pour conserver les correspondances exactes sur les noms d'ecrans, champs, erreurs et acronymes
 - index vectoriel Python integre, accelere automatiquement par `turbovec`
 
@@ -143,6 +144,41 @@ $env:ELEVENLABS_TTS_MODEL="eleven_multilingual_v2"
 ```
 
 Pour OpenAI, seule `OPENAI_API_KEY` est obligatoire. Si elle est definie dans les variables utilisateur ou systeme Windows, ouvrez un nouveau terminal avant de lancer l'application.
+
+### Anthropic
+
+```powershell
+$env:ANTHROPIC_API_KEY="votre_cle_anthropic"
+$env:ANTHROPIC_LIGHT_MODEL="claude-haiku-4-5"
+$env:ANTHROPIC_MEDIUM_MODEL="claude-sonnet-4-6"
+$env:ANTHROPIC_STRONG_MODEL="claude-opus-4-6"
+```
+
+Anthropic ne fournit pas d'API d'embeddings. CODEV utilise donc un index vectoriel local deterministe de faible cout machine, sans imposer une cle OpenAI ou un second fournisseur.
+
+### Google Gemini
+
+```powershell
+$env:GOOGLE_API_KEY="votre_cle_google"
+$env:GOOGLE_LIGHT_MODEL="gemini-2.5-flash-lite"
+$env:GOOGLE_MEDIUM_MODEL="gemini-2.5-flash"
+$env:GOOGLE_STRONG_MODEL="gemini-2.5-pro"
+$env:GOOGLE_EMBEDDING_MODEL="models/gemini-embedding-001"
+```
+
+### Azure OpenAI
+
+Les valeurs de deployment doivent correspondre exactement aux deployments crees dans la ressource Azure:
+
+```powershell
+$env:AZURE_OPENAI_API_KEY="votre_cle_azure"
+$env:AZURE_OPENAI_ENDPOINT="https://votre-ressource.openai.azure.com"
+$env:AZURE_OPENAI_API_VERSION="2025-03-01-preview"
+$env:AZURE_OPENAI_LIGHT_DEPLOYMENT="gpt-5-nano"
+$env:AZURE_OPENAI_MEDIUM_DEPLOYMENT="gpt-5-mini"
+$env:AZURE_OPENAI_STRONG_DEPLOYMENT="gpt-4.1"
+$env:AZURE_OPENAI_EMBEDDING_DEPLOYMENT="text-embedding-3-small"
+```
 
 ### Ollama local
 

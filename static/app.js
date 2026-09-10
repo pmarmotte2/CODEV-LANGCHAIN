@@ -453,6 +453,25 @@ function renderProviderHelp() {
       "Modeles requis : ollama pull qwen3:4b, ollama pull qwen3:8b, " +
       "ollama pull qwen3:14b et ollama pull nomic-embed-text. " +
       "Les noms et le port peuvent etre modifies avec les variables OLLAMA_* documentees dans le README.";
+  } else if (providerInput.value === "anthropic") {
+    providerHelpNode.textContent =
+      "Anthropic — definissez la cle avant de lancer CODEV :\n" +
+      '$env:ANTHROPIC_API_KEY="votre_cle_anthropic"\n' +
+      "Les documents utilisent un index vectoriel local sans seconde cle API. " +
+      "Les modeles peuvent etre modifies avec ANTHROPIC_LIGHT_MODEL, ANTHROPIC_MEDIUM_MODEL et ANTHROPIC_STRONG_MODEL.";
+  } else if (providerInput.value === "google") {
+    providerHelpNode.textContent =
+      "Google Gemini — definissez la cle Google AI avant de lancer CODEV :\n" +
+      '$env:GOOGLE_API_KEY="votre_cle_google"\n' +
+      "Le modele d'embedding par defaut est models/gemini-embedding-001.";
+  } else if (providerInput.value === "azure") {
+    providerHelpNode.textContent =
+      "Azure OpenAI — configurez la cle, l'endpoint et les noms de deployments :\n" +
+      '$env:AZURE_OPENAI_API_KEY="votre_cle_azure"\n' +
+      '$env:AZURE_OPENAI_ENDPOINT="https://votre-ressource.openai.azure.com"\n' +
+      '$env:AZURE_OPENAI_API_VERSION="2025-03-01-preview"\n' +
+      "Variables de deployments : AZURE_OPENAI_LIGHT_DEPLOYMENT, AZURE_OPENAI_MEDIUM_DEPLOYMENT, " +
+      "AZURE_OPENAI_STRONG_DEPLOYMENT et AZURE_OPENAI_EMBEDDING_DEPLOYMENT.";
   } else {
     providerHelpNode.textContent =
       "OpenAI — definissez la cle dans les variables d'environnement du systeme avant de lancer CODEV :\n" +

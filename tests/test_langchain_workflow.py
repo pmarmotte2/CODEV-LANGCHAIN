@@ -105,6 +105,35 @@ class LangChainWorkflowTests(unittest.TestCase):
         self.assertEqual(usage["estimated_cost_usd"], 0.0)
         self.assertTrue(usage["fully_priced"])
 
+    def test_hosted_provider_configuration_uses_its_own_key(self):
+        configurations = [
+            ("anthropic", "ANTHROPIC_API_KEY", "anthropic-test"),
+            ("google", "GOOGLE_API_KEY", "google-test"),
+        ]
+        for provider, variable, token in configurations:
+            with self.subTest(provider=provider), patch.dict(os.environ, {variable: token}):
+                client, model, _ = app.get_llm_config(provider, "medium")
+                self.assertEqual(client.provider, provider)
+                self.assertEqual(client.api_key, token)
+                self.assertEqual(model, app.PROVIDER_MODELS[provider]["medium"])
+
+    def test_azure_requires_key_and_endpoint(self):
+        with patch.dict(
+            os.environ,
+            {"AZURE_OPENAI_API_KEY": "azure-test"},
+            clear=False,
+        ), patch.object(app, "AZURE_OPENAI_ENDPOINT", ""):
+            with self.assertRaises(app.HTTPException):
+                app.get_provider_client("azure")
+
+    def test_anthropic_document_embeddings_are_local_and_deterministic(self):
+        first = app.build_local_hash_embeddings(["contrat rouge"])[0]
+        second = app.build_local_hash_embeddings(["contrat rouge"])[0]
+
+        self.assertEqual(first, second)
+        self.assertEqual(len(first), 384)
+        self.assertTrue(any(value != 0 for value in first))
+
     def test_negotiation_graph_calls_model_once_and_validates_decision(self):
         completions = FakeCompletions()
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))

@@ -5,6 +5,7 @@ os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
 import re
 import uuid
 import json
+import hashlib
 import urllib.error
 import urllib.request
 import unicodedata
@@ -19,7 +20,14 @@ from typing import Annotated, Any
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
-from langchain_openai import ChatOpenAI, OpenAIEmbeddings as LangChainOpenAIEmbeddings
+from langchain_anthropic import ChatAnthropic
+from langchain_google_genai import ChatGoogleGenerativeAI, GoogleGenerativeAIEmbeddings
+from langchain_openai import (
+    AzureChatOpenAI,
+    AzureOpenAIEmbeddings,
+    ChatOpenAI,
+    OpenAIEmbeddings as LangChainOpenAIEmbeddings,
+)
 from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
@@ -42,6 +50,22 @@ OLLAMA_LIGHT_MODEL = os.getenv("OLLAMA_LIGHT_MODEL", "qwen3:4b")
 OLLAMA_MEDIUM_MODEL = os.getenv("OLLAMA_MEDIUM_MODEL", "qwen3:8b")
 OLLAMA_STRONG_MODEL = os.getenv("OLLAMA_STRONG_MODEL", "qwen3:14b")
 OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
+ANTHROPIC_LIGHT_MODEL = os.getenv("ANTHROPIC_LIGHT_MODEL", "claude-haiku-4-5")
+ANTHROPIC_MEDIUM_MODEL = os.getenv("ANTHROPIC_MEDIUM_MODEL", "claude-sonnet-4-6")
+ANTHROPIC_STRONG_MODEL = os.getenv("ANTHROPIC_STRONG_MODEL", "claude-opus-4-6")
+GOOGLE_LIGHT_MODEL = os.getenv("GOOGLE_LIGHT_MODEL", "gemini-2.5-flash-lite")
+GOOGLE_MEDIUM_MODEL = os.getenv("GOOGLE_MEDIUM_MODEL", "gemini-2.5-flash")
+GOOGLE_STRONG_MODEL = os.getenv("GOOGLE_STRONG_MODEL", "gemini-2.5-pro")
+GOOGLE_EMBEDDING_MODEL = os.getenv("GOOGLE_EMBEDDING_MODEL", "models/gemini-embedding-001")
+AZURE_OPENAI_ENDPOINT = os.getenv("AZURE_OPENAI_ENDPOINT", "")
+AZURE_OPENAI_API_VERSION = os.getenv("AZURE_OPENAI_API_VERSION", "2025-03-01-preview")
+AZURE_LIGHT_MODEL = os.getenv("AZURE_OPENAI_LIGHT_DEPLOYMENT", "gpt-5-nano")
+AZURE_MEDIUM_MODEL = os.getenv("AZURE_OPENAI_MEDIUM_DEPLOYMENT", "gpt-5-mini")
+AZURE_STRONG_MODEL = os.getenv("AZURE_OPENAI_STRONG_DEPLOYMENT", "gpt-4.1")
+AZURE_EMBEDDING_MODEL = os.getenv(
+    "AZURE_OPENAI_EMBEDDING_DEPLOYMENT",
+    "text-embedding-3-small",
+)
 MAX_PDF_CHARS = 20_000
 MAX_DOCUMENT_CHARS = 60_000
 MAX_DOCUMENT_SESSION_CHARS = 500_000
@@ -61,6 +85,21 @@ PROVIDER_MODELS = {
         "light": OLLAMA_LIGHT_MODEL,
         "medium": OLLAMA_MEDIUM_MODEL,
         "strong": OLLAMA_STRONG_MODEL,
+    },
+    "anthropic": {
+        "light": ANTHROPIC_LIGHT_MODEL,
+        "medium": ANTHROPIC_MEDIUM_MODEL,
+        "strong": ANTHROPIC_STRONG_MODEL,
+    },
+    "google": {
+        "light": GOOGLE_LIGHT_MODEL,
+        "medium": GOOGLE_MEDIUM_MODEL,
+        "strong": GOOGLE_STRONG_MODEL,
+    },
+    "azure": {
+        "light": AZURE_LIGHT_MODEL,
+        "medium": AZURE_MEDIUM_MODEL,
+        "strong": AZURE_STRONG_MODEL,
     },
 }
 OPENAI_PRICING_USD_PER_MILLION = {
@@ -182,6 +221,29 @@ class LangChainChatCompletions:
                 base_url=self.client.base_url,
                 validate_model_on_init=True,
             )
+        if self.client.provider == "anthropic":
+            return ChatAnthropic(
+                model=model,
+                api_key=self.client.api_key,
+                timeout=120,
+                max_retries=2,
+            )
+        if self.client.provider == "google":
+            return ChatGoogleGenerativeAI(
+                model=model,
+                google_api_key=self.client.api_key,
+                timeout=120,
+                max_retries=2,
+            )
+        if self.client.provider == "azure":
+            return AzureChatOpenAI(
+                azure_deployment=model,
+                azure_endpoint=self.client.base_url,
+                api_key=self.client.api_key,
+                api_version=AZURE_OPENAI_API_VERSION,
+                timeout=120,
+                max_retries=2,
+            )
         model_options: dict[str, object] = {
             "model": model,
             "api_key": self.client.api_key,
@@ -205,8 +267,15 @@ class LangChainChatCompletions:
                 "cached_tokens": int(input_details.get("cache_read") or 0),
             },
         }
+        content = message.content or ""
+        if isinstance(content, list):
+            content = "\n".join(
+                str(block.get("text") or "")
+                for block in content
+                if isinstance(block, dict) and block.get("type") in {"text", "output_text"}
+            )
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=str(message.content or "")))],
+            choices=[SimpleNamespace(message=SimpleNamespace(content=str(content)))],
             model=model,
             usage=usage,
         )
@@ -234,12 +303,12 @@ class LangChainChatCompletions:
         schema: type[BaseModel],
         reasoning_effort: str | None = None,
     ) -> SimpleNamespace:
-        structured_options: dict[str, object] = {
-            "method": "json_schema",
-            "include_raw": True,
-        }
-        if self.client.provider == "openai":
+        structured_options: dict[str, object] = {"include_raw": True}
+        if self.client.provider in {"openai", "azure"}:
+            structured_options["method"] = "json_schema"
             structured_options["strict"] = True
+        elif self.client.provider == "ollama":
+            structured_options["method"] = "json_schema"
         structured_model = self._build_model(model, reasoning_effort).with_structured_output(
             schema,
             **structured_options,
@@ -266,6 +335,19 @@ class LLMChat:
         self.completions = LangChainChatCompletions(client)
 
 
+def build_local_hash_embeddings(texts: list[str], dimensions: int = 384) -> list[list[float]]:
+    vectors = []
+    for text in texts:
+        vector = [0.0] * dimensions
+        for term in TOKEN_PATTERN.findall(text.lower()):
+            digest = hashlib.blake2b(term.encode("utf-8"), digest_size=8).digest()
+            index = int.from_bytes(digest[:4], "big") % dimensions
+            sign = 1.0 if digest[4] & 1 else -1.0
+            vector[index] += sign
+        vectors.append(vector)
+    return vectors
+
+
 class LangChainEmbeddings:
     def __init__(self, client: "LLMClient") -> None:
         self.client = client
@@ -277,13 +359,30 @@ class LangChainEmbeddings:
                     model=model,
                     base_url=self.client.base_url,
                 )
+                embeddings = embedding_model.embed_documents(input)
+            elif self.client.provider == "google":
+                embedding_model = GoogleGenerativeAIEmbeddings(
+                    model=model,
+                    google_api_key=self.client.api_key,
+                )
+                embeddings = embedding_model.embed_documents(input)
+            elif self.client.provider == "azure":
+                embedding_model = AzureOpenAIEmbeddings(
+                    azure_deployment=model,
+                    azure_endpoint=self.client.base_url,
+                    api_key=self.client.api_key,
+                    api_version=AZURE_OPENAI_API_VERSION,
+                )
+                embeddings = embedding_model.embed_documents(input)
+            elif self.client.provider == "anthropic":
+                embeddings = build_local_hash_embeddings(input)
             else:
                 embedding_model = LangChainOpenAIEmbeddings(
                     model=model,
                     api_key=self.client.api_key,
                     base_url=self.client.base_url,
                 )
-            embeddings = embedding_model.embed_documents(input)
+                embeddings = embedding_model.embed_documents(input)
             import tiktoken
 
             encoding = tiktoken.get_encoding("cl100k_base")
@@ -371,13 +470,25 @@ def get_provider_client(provider: str) -> LLMClient:
     selected = normalize_provider(provider)
     if selected == "ollama":
         return LLMClient(provider=selected, api_key="", base_url=OLLAMA_BASE_URL)
-    token = os.getenv("OPENAI_API_KEY", "").strip()
+    environment = {
+        "openai": ("OPENAI_API_KEY", OPENAI_BASE_URL),
+        "anthropic": ("ANTHROPIC_API_KEY", ""),
+        "google": ("GOOGLE_API_KEY", ""),
+        "azure": ("AZURE_OPENAI_API_KEY", AZURE_OPENAI_ENDPOINT),
+    }
+    key_name, base_url = environment[selected]
+    token = os.getenv(key_name, "").strip()
     if not token:
         raise HTTPException(
             status_code=400,
-            detail="La variable d'environnement OPENAI_API_KEY est obligatoire.",
+            detail=f"La variable d'environnement {key_name} est obligatoire.",
         )
-    return LLMClient(provider=selected, api_key=token, base_url=OPENAI_BASE_URL)
+    if selected == "azure" and not base_url:
+        raise HTTPException(
+            status_code=400,
+            detail="La variable d'environnement AZURE_OPENAI_ENDPOINT est obligatoire.",
+        )
+    return LLMClient(provider=selected, api_key=token, base_url=base_url)
 
 
 def get_llm_config(provider: str, model_level: str) -> tuple[LLMClient, str, str | None]:
@@ -394,7 +505,14 @@ def get_llm_config(provider: str, model_level: str) -> tuple[LLMClient, str, str
 
 def get_embedding_config(provider: str) -> tuple[LLMClient, str]:
     selected = normalize_provider(provider)
-    model = OLLAMA_EMBEDDING_MODEL if selected == "ollama" else OPENAI_EMBEDDING_MODEL
+    models = {
+        "openai": OPENAI_EMBEDDING_MODEL,
+        "ollama": OLLAMA_EMBEDDING_MODEL,
+        "anthropic": "local-hash-v1",
+        "google": GOOGLE_EMBEDDING_MODEL,
+        "azure": AZURE_EMBEDDING_MODEL,
+    }
+    model = models[selected]
     return get_provider_client(selected), model
 
 
@@ -414,7 +532,7 @@ def summarize_llm_usage(
     )
     pricing = OPENAI_PRICING_USD_PER_MILLION.get(model)
     estimated_cost_usd = None
-    if model.startswith("ollama:"):
+    if model.startswith("ollama:") or model == "anthropic:local-hash-v1":
         estimated_cost_usd = 0.0
     if pricing is not None:
         uncached_tokens = max(prompt_tokens - cached_tokens, 0)
