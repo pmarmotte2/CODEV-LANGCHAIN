@@ -1,6 +1,8 @@
 const form = document.querySelector("#negotiation-form");
 const topicInput = document.querySelector("#topic");
 const profileInput = document.querySelector("#profile");
+const providerInput = document.querySelector("#llm-provider");
+const providerHelpNode = document.querySelector("#provider-help");
 const modelLevelInput = document.querySelector("#model-level");
 const argumentInput = document.querySelector("#argument");
 const agreementInput = document.querySelector("#agreement");
@@ -416,6 +418,7 @@ function setComposerEnabled(isEnabled) {
 
 function setSetupEnabled(isEnabled) {
   topicInput.disabled = !isEnabled;
+  providerInput.disabled = !isEnabled;
   modelLevelInput.disabled = !isEnabled;
   agreementInput.disabled = !isEnabled;
   projectDocsInput.disabled = !isEnabled;
@@ -436,9 +439,26 @@ function getProjectDocumentFiles() {
 }
 
 function getProjectDocumentSignature(files) {
-  return files
+  const filesSignature = files
     .map((file) => `${file.webkitRelativePath || file.name}:${file.size}:${file.lastModified}`)
     .join("|");
+  return `${providerInput.value}|${filesSignature}`;
+}
+
+function renderProviderHelp() {
+  if (providerInput.value === "ollama") {
+    providerHelpNode.textContent =
+      "Ollama local — installez Ollama puis lancez-le sur http://127.0.0.1:11434 :\n" +
+      '$env:OLLAMA_HOST="127.0.0.1:11434"; ollama serve\n' +
+      "Modeles requis : ollama pull qwen3:4b, ollama pull qwen3:8b, " +
+      "ollama pull qwen3:14b et ollama pull nomic-embed-text. " +
+      "Les noms et le port peuvent etre modifies avec les variables OLLAMA_* documentees dans le README.";
+  } else {
+    providerHelpNode.textContent =
+      "OpenAI — definissez la cle dans les variables d'environnement du systeme avant de lancer CODEV :\n" +
+      '$env:OPENAI_API_KEY="votre_cle_openai"\n' +
+      "Aucune cle n'est saisie ni stockee dans l'interface.";
+  }
 }
 
 async function ensureDocumentSession() {
@@ -454,6 +474,7 @@ async function ensureDocumentSession() {
   }
 
   const payload = new FormData();
+  payload.append("provider", providerInput.value);
   for (const file of files) {
     payload.append("project_docs", file, file.webkitRelativePath || file.name);
   }
@@ -468,7 +489,7 @@ async function ensureDocumentSession() {
     throw new Error(data.detail || "Documentation projet invalide.");
   }
 
-  addOpenAIUsage(data.openai_usage);
+  addOpenAIUsage(data.llm_usage || data.openai_usage);
   documentSessionId = data.document_session_id;
   documentSessionSignature = signature;
   sessionSourceFiles.project_documents = files.map(
@@ -483,6 +504,7 @@ function buildPayload(argument = "") {
   const payload = new FormData();
   payload.append("topic", topicInput.value.trim());
   payload.append("profile", profileInput.value);
+  payload.append("provider", providerInput.value);
   payload.append("model_level", modelLevelInput.value);
   payload.append("argument", argument);
   payload.append("history", JSON.stringify(history));
@@ -631,6 +653,7 @@ async function saveSession() {
     saved_at: new Date().toISOString(),
     topic: topicInput.value.trim(),
     profile: profileInput.value,
+    provider: providerInput.value,
     model_level: modelLevelInput.value,
     display_name: sessionDisplayName,
     history,
@@ -644,7 +667,7 @@ async function saveSession() {
         ? getProjectDocumentFiles().map((file) => file.webkitRelativePath || file.name)
         : sessionSourceFiles.project_documents,
     },
-    openai_usage: {
+    llm_usage: {
       estimated_cost_usd: sessionCostUsd,
       api_calls: sessionOpenAICalls,
       total_tokens: sessionOpenAITokens,
@@ -660,7 +683,7 @@ async function saveSession() {
   if (!response.ok) {
     throw new Error(data.detail || "Sauvegarde impossible.");
   }
-  addOpenAIUsage(data.openai_usage);
+  addOpenAIUsage(data.llm_usage || data.openai_usage);
   sessionDisplayName = data.display_name || sessionDisplayName;
   await refreshSavedSessions(data.id);
   setMicrophoneStatus("Discussion et documentation sauvegardees localement.");
@@ -711,6 +734,7 @@ async function loadSession(rawSession) {
   if (savedDocumentSessionId) {
     const restorePayload = new FormData();
     restorePayload.append("document_session_id", savedDocumentSessionId);
+    restorePayload.append("provider", rawSession.provider || "openai");
     const restoreResponse = await fetch("/api/document-session/restore", {
       method: "POST",
       body: restorePayload,
@@ -718,7 +742,7 @@ async function loadSession(rawSession) {
     const restoreData = await readJsonResponse(restoreResponse);
     if (restoreResponse.ok) {
       restoredDocumentSessionId = restoreData.document_session_id;
-      restorationUsage = restoreData.openai_usage;
+      restorationUsage = restoreData.llm_usage || restoreData.openai_usage;
     }
   }
 
@@ -743,11 +767,17 @@ async function loadSession(rawSession) {
   if ([...profileInput.options].some((option) => option.value === rawSession.profile)) {
     profileInput.value = rawSession.profile;
   }
+  if ([...providerInput.options].some((option) => option.value === rawSession.provider)) {
+    providerInput.value = rawSession.provider;
+  } else {
+    providerInput.value = "openai";
+  }
+  renderProviderHelp();
   if ([...modelLevelInput.options].some((option) => option.value === rawSession.model_level)) {
     modelLevelInput.value = rawSession.model_level;
   }
 
-  const usage = rawSession.openai_usage || {};
+  const usage = rawSession.llm_usage || rawSession.openai_usage || {};
   sessionCostUsd = Math.max(0, Number(usage.estimated_cost_usd) || 0);
   sessionOpenAICalls = Math.max(0, Number(usage.api_calls) || 0);
   sessionOpenAITokens = Math.max(0, Number(usage.total_tokens) || 0);
@@ -814,6 +844,7 @@ async function improveReport(report, button) {
   setLoading(true);
 
   const payload = new FormData();
+  payload.append("provider", providerInput.value);
   payload.append("model_level", modelLevelInput.value);
   payload.append("report", JSON.stringify(report));
 
@@ -828,7 +859,7 @@ async function improveReport(report, button) {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
-    addOpenAIUsage(data.openai_usage);
+    addOpenAIUsage(data.llm_usage || data.openai_usage);
     appendImprovement(data.improvement || {});
     button.textContent = "Analyse generee";
   } catch (error) {
@@ -1267,7 +1298,7 @@ startButton.addEventListener("click", async () => {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
-    addOpenAIUsage(data.openai_usage);
+    addOpenAIUsage(data.llm_usage || data.openai_usage);
     addValidatedDecisions(data.validated_decisions);
     history.push({ role: "assistant", content: data.reply });
     hasStarted = true;
@@ -1304,7 +1335,7 @@ helpAnswerButton.addEventListener("click", async () => {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
-    addOpenAIUsage(data.openai_usage);
+    addOpenAIUsage(data.llm_usage || data.openai_usage);
     appendMessage("helper", data.reply);
   } catch (error) {
     appendMessage("error", error.message);
@@ -1333,7 +1364,7 @@ framingReportButton.addEventListener("click", async () => {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
-    addOpenAIUsage(data.openai_usage);
+    addOpenAIUsage(data.llm_usage || data.openai_usage);
     lastReport = data.report || null;
     lastReportMarkdown = data.markdown || "";
     appendReport(data.report || {}, data.markdown || "");
@@ -1386,7 +1417,7 @@ form.addEventListener("submit", async (event) => {
       throw new Error(data.detail || "Erreur inconnue.");
     }
 
-    addOpenAIUsage(data.openai_usage);
+    addOpenAIUsage(data.llm_usage || data.openai_usage);
     addValidatedDecisions(data.validated_decisions);
     history.push({ role: "user", content: argument }, { role: "assistant", content: data.reply });
     appendMessage("assistant", data.reply);
@@ -1477,6 +1508,11 @@ stopVoiceButton.addEventListener("click", () => {
 
 previewVoiceButton.addEventListener("click", previewSelectedVoice);
 
+providerInput.addEventListener("change", () => {
+  documentSessionId = "";
+  documentSessionSignature = "";
+  renderProviderHelp();
+});
 ttsProviderInput.addEventListener("change", renderTtsProvider);
 elevenLabsApiKeyInput.addEventListener("change", () => {
   if (ttsProviderInput.value === "elevenlabs") {
@@ -1489,6 +1525,7 @@ if (speechSynthesizer) {
 }
 
 setupSpeechRecognition();
+renderProviderHelp();
 renderTtsProvider();
 renderValidatedDecisions();
 renderSessionCost();

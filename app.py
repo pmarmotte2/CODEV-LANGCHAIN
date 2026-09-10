@@ -20,6 +20,7 @@ from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings as LangChainOpenAIEmbeddings
+from langchain_ollama import ChatOllama, OllamaEmbeddings
 from langgraph.graph import END, START, StateGraph
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -36,6 +37,11 @@ OPENAI_EMBEDDING_MODEL = os.getenv(
     "OPENAI_EMBEDDING_MODEL",
     "text-embedding-3-small",
 )
+OLLAMA_BASE_URL = os.getenv("OLLAMA_BASE_URL", "http://127.0.0.1:11434")
+OLLAMA_LIGHT_MODEL = os.getenv("OLLAMA_LIGHT_MODEL", "qwen3:4b")
+OLLAMA_MEDIUM_MODEL = os.getenv("OLLAMA_MEDIUM_MODEL", "qwen3:8b")
+OLLAMA_STRONG_MODEL = os.getenv("OLLAMA_STRONG_MODEL", "qwen3:14b")
+OLLAMA_EMBEDDING_MODEL = os.getenv("OLLAMA_EMBEDDING_MODEL", "nomic-embed-text")
 MAX_PDF_CHARS = 20_000
 MAX_DOCUMENT_CHARS = 60_000
 MAX_DOCUMENT_SESSION_CHARS = 500_000
@@ -45,16 +51,23 @@ MAX_RETRIEVED_DOCUMENT_CHUNKS = 6
 MAX_HISTORY_MESSAGES = 12
 DOCUMENT_INDEX_VERSION = 1
 SESSION_DATA_DIR = Path(__file__).resolve().parent / "data" / "sessions"
-MODEL_LEVELS = {
-    "light": OPENAI_LIGHT_MODEL,
-    "medium": OPENAI_MEDIUM_MODEL,
-    "strong": OPENAI_STRONG_MODEL,
+PROVIDER_MODELS = {
+    "openai": {
+        "light": OPENAI_LIGHT_MODEL,
+        "medium": OPENAI_MEDIUM_MODEL,
+        "strong": OPENAI_STRONG_MODEL,
+    },
+    "ollama": {
+        "light": OLLAMA_LIGHT_MODEL,
+        "medium": OLLAMA_MEDIUM_MODEL,
+        "strong": OLLAMA_STRONG_MODEL,
+    },
 }
 OPENAI_PRICING_USD_PER_MILLION = {
-    "gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
-    "gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
-    "gpt-4.1": {"input": 2.00, "cached_input": 0.50, "output": 8.00},
-    "text-embedding-3-small": {"input": 0.02, "cached_input": 0.02, "output": 0.0},
+    "openai:gpt-5-nano": {"input": 0.05, "cached_input": 0.005, "output": 0.40},
+    "openai:gpt-5.6-luna": {"input": 0.20, "cached_input": 0.02, "output": 1.20},
+    "openai:gpt-4.1": {"input": 2.00, "cached_input": 0.50, "output": 8.00},
+    "openai:text-embedding-3-small": {"input": 0.02, "cached_input": 0.02, "output": 0.0},
 }
 
 
@@ -154,15 +167,21 @@ class DocumentSession:
     vector_index: object | None = None
 
 
-class OpenAIError(Exception):
+class LLMProviderError(Exception):
     pass
 
 
 class LangChainChatCompletions:
-    def __init__(self, client: "OpenAIClient") -> None:
+    def __init__(self, client: "LLMClient") -> None:
         self.client = client
 
-    def _build_model(self, model: str, reasoning_effort: str | None) -> ChatOpenAI:
+    def _build_model(self, model: str, reasoning_effort: str | None) -> Any:
+        if self.client.provider == "ollama":
+            return ChatOllama(
+                model=model,
+                base_url=self.client.base_url,
+                validate_model_on_init=True,
+            )
         model_options: dict[str, object] = {
             "model": model,
             "api_key": self.client.api_key,
@@ -188,7 +207,7 @@ class LangChainChatCompletions:
         }
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(content=str(message.content or "")))],
-            model=message.response_metadata.get("model_name", model),
+            model=model,
             usage=usage,
         )
 
@@ -205,8 +224,8 @@ class LangChainChatCompletions:
         try:
             message = chat_model.invoke(messages)
         except Exception as exc:
-            raise OpenAIError(str(exc)) from exc
-        return self._legacy_response(message, model)
+            raise LLMProviderError(str(exc)) from exc
+        return self._legacy_response(message, f"{self.client.provider}:{model}")
 
     def create_structured(
         self,
@@ -215,61 +234,75 @@ class LangChainChatCompletions:
         schema: type[BaseModel],
         reasoning_effort: str | None = None,
     ) -> SimpleNamespace:
+        structured_options: dict[str, object] = {
+            "method": "json_schema",
+            "include_raw": True,
+        }
+        if self.client.provider == "openai":
+            structured_options["strict"] = True
         structured_model = self._build_model(model, reasoning_effort).with_structured_output(
             schema,
-            method="json_schema",
-            strict=True,
-            include_raw=True,
+            **structured_options,
         )
         try:
             result = structured_model.invoke(messages)
         except Exception as exc:
-            raise OpenAIError(str(exc)) from exc
+            raise LLMProviderError(str(exc)) from exc
         parsing_error = result.get("parsing_error")
         parsed = result.get("parsed")
         raw = result.get("raw")
         if parsing_error is not None or parsed is None or raw is None:
             detail = str(parsing_error or "reponse structuree absente")
-            raise OpenAIError(f"Reponse OpenAI structuree invalide: {detail}")
-        response = self._legacy_response(raw, model)
+            raise LLMProviderError(
+                f"Reponse structuree {self.client.provider} invalide: {detail}"
+            )
+        response = self._legacy_response(raw, f"{self.client.provider}:{model}")
         response.parsed = parsed
         return response
 
 
-class OpenAIChat:
-    def __init__(self, client: "OpenAIClient") -> None:
+class LLMChat:
+    def __init__(self, client: "LLMClient") -> None:
         self.completions = LangChainChatCompletions(client)
 
 
 class LangChainEmbeddings:
-    def __init__(self, client: "OpenAIClient") -> None:
+    def __init__(self, client: "LLMClient") -> None:
         self.client = client
 
     def create(self, model: str, input: list[str]) -> SimpleNamespace:
         try:
-            embeddings = LangChainOpenAIEmbeddings(
-                model=model,
-                api_key=self.client.api_key,
-                base_url=self.client.base_url,
-            ).embed_documents(input)
+            if self.client.provider == "ollama":
+                embedding_model = OllamaEmbeddings(
+                    model=model,
+                    base_url=self.client.base_url,
+                )
+            else:
+                embedding_model = LangChainOpenAIEmbeddings(
+                    model=model,
+                    api_key=self.client.api_key,
+                    base_url=self.client.base_url,
+                )
+            embeddings = embedding_model.embed_documents(input)
             import tiktoken
 
             encoding = tiktoken.get_encoding("cl100k_base")
             prompt_tokens = sum(len(encoding.encode(text)) for text in input)
         except Exception as exc:
-            raise OpenAIError(str(exc)) from exc
+            raise LLMProviderError(str(exc)) from exc
         return SimpleNamespace(
             data=[SimpleNamespace(embedding=embedding) for embedding in embeddings],
-            model=model,
+            model=f"{self.client.provider}:{model}",
             usage={"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
         )
 
 
-class OpenAIClient:
-    def __init__(self, api_key: str, base_url: str) -> None:
+class LLMClient:
+    def __init__(self, provider: str, api_key: str, base_url: str) -> None:
+        self.provider = provider
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
-        self.chat = OpenAIChat(self)
+        self.chat = LLMChat(self)
         self.embeddings = LangChainEmbeddings(self)
 
 
@@ -327,29 +360,45 @@ def call_elevenlabs_audio(path: str, api_key: str, payload: dict[str, object]) -
         raise ElevenLabsError(str(exc)) from exc
 
 
-def get_openai_client() -> OpenAIClient:
+def normalize_provider(provider: str) -> str:
+    selected = provider.strip().lower()
+    if selected not in PROVIDER_MODELS:
+        raise HTTPException(status_code=400, detail="Fournisseur LLM non pris en charge.")
+    return selected
+
+
+def get_provider_client(provider: str) -> LLMClient:
+    selected = normalize_provider(provider)
+    if selected == "ollama":
+        return LLMClient(provider=selected, api_key="", base_url=OLLAMA_BASE_URL)
     token = os.getenv("OPENAI_API_KEY", "").strip()
     if not token:
         raise HTTPException(
             status_code=400,
             detail="La variable d'environnement OPENAI_API_KEY est obligatoire.",
         )
-    return OpenAIClient(api_key=token, base_url=OPENAI_BASE_URL)
+    return LLMClient(provider=selected, api_key=token, base_url=OPENAI_BASE_URL)
 
 
-def get_llm_config(model_level: str) -> tuple[OpenAIClient, str, str | None]:
-    model = MODEL_LEVELS.get(model_level, OPENAI_MEDIUM_MODEL)
+def get_llm_config(provider: str, model_level: str) -> tuple[LLMClient, str, str | None]:
+    selected = normalize_provider(provider)
+    models = PROVIDER_MODELS[selected]
+    model = models.get(model_level, models["medium"])
     reasoning_effort = None
-    if model_level == "medium" and (model == "gpt-5.6" or model.startswith("gpt-5.6-")):
+    if selected == "openai" and model_level == "medium" and (
+        model == "gpt-5.6" or model.startswith("gpt-5.6-")
+    ):
         reasoning_effort = "none"
-    return get_openai_client(), model, reasoning_effort
+    return get_provider_client(selected), model, reasoning_effort
 
 
-def get_embedding_config() -> tuple[OpenAIClient, str]:
-    return get_openai_client(), OPENAI_EMBEDDING_MODEL
+def get_embedding_config(provider: str) -> tuple[LLMClient, str]:
+    selected = normalize_provider(provider)
+    model = OLLAMA_EMBEDDING_MODEL if selected == "ollama" else OPENAI_EMBEDDING_MODEL
+    return get_provider_client(selected), model
 
 
-def summarize_openai_usage(
+def summarize_llm_usage(
     model: str,
     usage: dict[str, object],
     *,
@@ -365,6 +414,8 @@ def summarize_openai_usage(
     )
     pricing = OPENAI_PRICING_USD_PER_MILLION.get(model)
     estimated_cost_usd = None
+    if model.startswith("ollama:"):
+        estimated_cost_usd = 0.0
     if pricing is not None:
         uncached_tokens = max(prompt_tokens - cached_tokens, 0)
         input_cost = (
@@ -381,7 +432,7 @@ def summarize_openai_usage(
     }
 
 
-def merge_openai_usage(*summaries: dict[str, object]) -> dict[str, object]:
+def merge_llm_usage(*summaries: dict[str, object]) -> dict[str, object]:
     priced_costs = [
         float(summary["estimated_cost_usd"])
         for summary in summaries
@@ -396,17 +447,17 @@ def merge_openai_usage(*summaries: dict[str, object]) -> dict[str, object]:
 
 
 def get_embedding_vectors(
-    client: OpenAIClient,
+    client: LLMClient,
     model: str,
     texts: list[str],
 ) -> tuple[list[list[float]], dict[str, object]]:
     if not texts:
-        return [], merge_openai_usage()
+        return [], merge_llm_usage()
 
     response = client.embeddings.create(model=model, input=texts)
     return (
         [item.embedding for item in response.data],
-        summarize_openai_usage(response.model, response.usage, embedding=True),
+        summarize_llm_usage(response.model, response.usage, embedding=True),
     )
 
 
@@ -579,10 +630,10 @@ def sanitize_saved_session_label(label: str, fallback_topic: str) -> str:
     return " ".join(words).strip(" -'") or build_saved_session_label(fallback_topic)
 
 
-def generate_saved_session_label(topic: str) -> tuple[str, dict[str, object]]:
-    client = get_openai_client()
+def generate_saved_session_label(topic: str, provider: str) -> tuple[str, dict[str, object]]:
+    client, model, reasoning_effort = get_llm_config(provider, "light")
     response = client.chat.completions.create_structured(
-        model=OPENAI_LIGHT_MODEL,
+        model=model,
         messages=[
             {
                 "role": "system",
@@ -596,11 +647,12 @@ def generate_saved_session_label(topic: str) -> tuple[str, dict[str, object]]:
             {"role": "user", "content": topic},
         ],
         schema=SavedSessionTitle,
+        reasoning_effort=reasoning_effort,
     )
     raw_label = response.parsed.title
     return (
         sanitize_saved_session_label(raw_label, topic),
-        summarize_openai_usage(response.model, response.usage),
+        summarize_llm_usage(response.model, response.usage),
     )
 
 
@@ -653,6 +705,7 @@ def persist_document_session(
 
 def load_persisted_document_session(
     session_id: str,
+    provider: str = "openai",
 ) -> tuple[DocumentSession, dict[str, object]]:
     session_dir = get_persisted_session_dir(session_id)
     index_path = session_dir / "index.json"
@@ -672,11 +725,12 @@ def load_persisted_document_session(
     except (OSError, ValueError, TypeError, KeyError, json.JSONDecodeError) as exc:
         raise HTTPException(status_code=409, detail="Index documentaire sauvegarde invalide.") from exc
 
-    embedding_usage = merge_openai_usage()
+    embedding_usage = merge_llm_usage()
+    client, embedding_model = get_embedding_config(provider)
+    expected_embedding_model = f"{normalize_provider(provider)}:{embedding_model}"
     saved_model = str(index_data.get("embedding_model") or "")
     rebuilt_embeddings = False
-    if saved_model != OPENAI_EMBEDDING_MODEL:
-        client, embedding_model = get_embedding_config()
+    if saved_model != expected_embedding_model:
         try:
             raw_vectors, embedding_usage = get_embedding_vectors(
                 client,
@@ -684,7 +738,7 @@ def load_persisted_document_session(
                 [f"{source}\n{text}" for source, text in zip(sources, texts)],
             )
             vectors = [normalize_vector(vector) for vector in raw_vectors]
-            saved_model = embedding_model
+            saved_model = expected_embedding_model
             rebuilt_embeddings = True
         except Exception as exc:
             raise HTTPException(
@@ -749,6 +803,7 @@ def load_persisted_document_session(
 
 async def build_document_session(
     files: list[UploadFile] | None,
+    provider: str = "openai",
 ) -> tuple[DocumentSession, dict[str, object]]:
     if not files:
         raise HTTPException(status_code=400, detail="Aucune documentation projet fournie.")
@@ -785,7 +840,8 @@ async def build_document_session(
             detail="Aucun contenu exploitable trouve dans la documentation projet.",
         )
 
-    client, embedding_model = get_embedding_config()
+    selected_provider = normalize_provider(provider)
+    client, embedding_model = get_embedding_config(selected_provider)
     try:
         raw_vectors, embedding_usage = get_embedding_vectors(
             client,
@@ -817,7 +873,7 @@ async def build_document_session(
         chunks=chunks,
         source_count=len(source_names),
         retrieval_mode=retrieval_mode,
-        embedding_model=embedding_model,
+        embedding_model=f"{selected_provider}:{embedding_model}",
         source_files=source_files,
         vector_index=vector_index,
     )
@@ -873,15 +929,19 @@ def score_vector_chunks(
 def retrieve_project_context(
     document_session_id: str,
     query: str,
+    provider: str = "openai",
 ) -> tuple[str, dict[str, object]]:
     if not document_session_id:
-        return "", merge_openai_usage()
+        return "", merge_llm_usage()
 
     session = DOCUMENT_SESSIONS.get(document_session_id)
-    restoration_usage = merge_openai_usage()
+    restoration_usage = merge_llm_usage()
     if session is None:
         try:
-            session, restoration_usage = load_persisted_document_session(document_session_id)
+            session, restoration_usage = load_persisted_document_session(
+                document_session_id,
+                provider,
+            )
         except HTTPException as exc:
             raise HTTPException(
                 status_code=409,
@@ -893,10 +953,17 @@ def retrieve_project_context(
         selected_chunks = session.chunks[: min(MAX_RETRIEVED_DOCUMENT_CHUNKS, len(session.chunks))]
         embedding_usage = restoration_usage
     else:
-        client, embedding_model = get_embedding_config()
+        selected_provider = normalize_provider(provider)
+        client, embedding_model = get_embedding_config(selected_provider)
+        expected_embedding_model = f"{selected_provider}:{embedding_model}"
+        if session.embedding_model != expected_embedding_model:
+            raise HTTPException(
+                status_code=409,
+                detail="Le fournisseur a change. Rechargez la documentation projet.",
+            )
         try:
             query_vectors, query_usage = get_embedding_vectors(client, embedding_model, [query])
-            embedding_usage = merge_openai_usage(restoration_usage, query_usage)
+            embedding_usage = merge_llm_usage(restoration_usage, query_usage)
             query_vector = normalize_vector(query_vectors[0])
         except Exception as exc:
             raise HTTPException(
@@ -1099,7 +1166,7 @@ def validate_and_classify_decision_sources(
 
 
 class NegotiationGraphState(TypedDict, total=False):
-    client: OpenAIClient
+    client: LLMClient
     model: str
     reasoning_effort: str | None
     messages: list[dict[str, str]]
@@ -1356,32 +1423,36 @@ def favicon() -> FileResponse:
 
 @app.post("/api/document-session")
 async def create_document_session(
+    provider: Annotated[str, Form()] = "openai",
     project_docs: Annotated[list[UploadFile] | None, File()] = None,
 ) -> dict[str, object]:
-    session, openai_usage = await build_document_session(project_docs)
+    session, openai_usage = await build_document_session(project_docs, provider)
     return {
         "document_session_id": session.session_id,
         "chunks": len(session.chunks),
         "sources": session.source_count,
         "retrieval_mode": session.retrieval_mode,
-        "openai_usage": openai_usage,
+        "llm_usage": openai_usage,
     }
 
 
 @app.post("/api/document-session/restore")
 async def restore_document_session(
     document_session_id: Annotated[str, Form()],
+    provider: Annotated[str, Form()] = "openai",
 ) -> dict[str, object]:
     session = DOCUMENT_SESSIONS.get(document_session_id)
-    openai_usage = merge_openai_usage()
-    if session is None:
-        session, openai_usage = load_persisted_document_session(document_session_id)
+    openai_usage = merge_llm_usage()
+    _, embedding_model = get_embedding_config(provider)
+    expected_embedding_model = f"{normalize_provider(provider)}:{embedding_model}"
+    if session is None or session.embedding_model != expected_embedding_model:
+        session, openai_usage = load_persisted_document_session(document_session_id, provider)
     return {
         "document_session_id": session.session_id,
         "chunks": len(session.chunks),
         "sources": session.source_count,
         "retrieval_mode": session.retrieval_mode,
-        "openai_usage": openai_usage,
+        "llm_usage": openai_usage,
     }
 
 
@@ -1415,14 +1486,15 @@ def save_discussion_session(payload: Annotated[dict[str, object], Body()]) -> di
         raise HTTPException(status_code=400, detail="La discussion est vide.")
 
     topic = str(payload.get("topic") or "Discussion CODEV").strip()
+    provider = normalize_provider(str(payload.get("provider") or "openai"))
     existing_display_name = str(payload.get("display_name") or "").strip()
     if existing_display_name:
         display_name = sanitize_saved_session_label(existing_display_name, topic)
-        naming_usage = merge_openai_usage()
+        naming_usage = merge_llm_usage()
     else:
         try:
-            display_name, naming_usage = generate_saved_session_label(topic)
-        except OpenAIError as exc:
+            display_name, naming_usage = generate_saved_session_label(topic, provider)
+        except LLMProviderError as exc:
             raise HTTPException(status_code=502, detail=f"Nom de sauvegarde impossible: {exc}") from exc
     saved_session_id = build_saved_session_id(display_name)
     saved_path = get_persisted_session_dir(saved_session_id)
@@ -1430,7 +1502,7 @@ def save_discussion_session(payload: Annotated[dict[str, object], Body()]) -> di
     document_session = DOCUMENT_SESSIONS.get(document_session_id)
     if document_session is None and document_session_id:
         try:
-            document_session, _ = load_persisted_document_session(document_session_id)
+            document_session, _ = load_persisted_document_session(document_session_id, provider)
         except HTTPException:
             document_session = None
 
@@ -1457,11 +1529,12 @@ def save_discussion_session(payload: Annotated[dict[str, object], Body()]) -> di
         payload["saved_at"] = datetime.now(timezone.utc).isoformat()
         payload["storage_id"] = saved_session_id
         payload["display_name"] = display_name
-        previous_usage = payload.get("openai_usage")
-        payload["openai_usage"] = merge_openai_usage(
-            previous_usage if isinstance(previous_usage, dict) else merge_openai_usage(),
+        previous_usage = payload.get("llm_usage") or payload.get("openai_usage")
+        payload["llm_usage"] = merge_llm_usage(
+            previous_usage if isinstance(previous_usage, dict) else merge_llm_usage(),
             naming_usage,
         )
+        payload.pop("openai_usage", None)
         (saved_path / "session.json").write_text(
             json.dumps(payload, ensure_ascii=False, indent=2),
             encoding="utf-8",
@@ -1473,7 +1546,7 @@ def save_discussion_session(payload: Annotated[dict[str, object], Body()]) -> di
         "id": saved_session_id,
         "display_name": display_name,
         "saved_at": payload["saved_at"],
-        "openai_usage": naming_usage,
+        "llm_usage": naming_usage,
     }
 
 
@@ -1590,6 +1663,7 @@ async def negotiate(
     topic: Annotated[str, Form()],
     argument: Annotated[str, Form()] = "",
     profile: Annotated[str, Form()] = "sales",
+    provider: Annotated[str, Form()] = "openai",
     model_level: Annotated[str, Form()] = "medium",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
@@ -1625,6 +1699,7 @@ async def negotiate(
     project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
+        provider,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
@@ -1659,7 +1734,7 @@ async def negotiate(
     else:
         messages.append({"role": "user", "content": build_opening_prompt()})
 
-    client, model, reasoning_effort = get_llm_config(model_level)
+    client, model, reasoning_effort = get_llm_config(provider, model_level)
     graph_result = NEGOTIATION_GRAPH.invoke({
         "client": client,
         "model": model,
@@ -1676,13 +1751,13 @@ async def negotiate(
     reply = graph_result.get("reply", "")
     new_decisions = graph_result.get("decisions", [])
     if not reply:
-        raise HTTPException(status_code=502, detail="Reponse de negociation OpenAI invalide.")
+        raise HTTPException(status_code=502, detail="Reponse de negociation du fournisseur invalide.")
     return {
         "reply": reply,
         "validated_decisions": new_decisions,
-        "openai_usage": merge_openai_usage(
+        "llm_usage": merge_llm_usage(
             embedding_usage,
-            summarize_openai_usage(response.model, response.usage),
+            summarize_llm_usage(response.model, response.usage),
         ),
     }
 
@@ -1692,6 +1767,7 @@ async def help_answer(
     topic: Annotated[str, Form()],
     argument: Annotated[str, Form()] = "",
     profile: Annotated[str, Form()] = "sales",
+    provider: Annotated[str, Form()] = "openai",
     model_level: Annotated[str, Form()] = "medium",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
@@ -1729,6 +1805,7 @@ async def help_answer(
     project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
+        provider,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
@@ -1769,7 +1846,7 @@ async def help_answer(
         }
     )
 
-    client, model, reasoning_effort = get_llm_config(model_level)
+    client, model, reasoning_effort = get_llm_config(provider, model_level)
     response = client.chat.completions.create(
         model=model,
         messages=messages,
@@ -1779,9 +1856,9 @@ async def help_answer(
     content = response.choices[0].message.content or ""
     return {
         "reply": content.strip(),
-        "openai_usage": merge_openai_usage(
+        "llm_usage": merge_llm_usage(
             embedding_usage,
-            summarize_openai_usage(response.model, response.usage),
+            summarize_llm_usage(response.model, response.usage),
         ),
     }
 
@@ -1790,6 +1867,7 @@ async def help_answer(
 async def framing_report(
     topic: Annotated[str, Form()],
     profile: Annotated[str, Form()] = "sales",
+    provider: Annotated[str, Form()] = "openai",
     model_level: Annotated[str, Form()] = "medium",
     history: Annotated[str, Form()] = "[]",
     validated_decisions: Annotated[str, Form()] = "[]",
@@ -1824,6 +1902,7 @@ async def framing_report(
     project_document_text, embedding_usage = retrieve_project_context(
         document_session_id,
         retrieval_query,
+        provider,
     )
     if not project_document_text and project_docs:
         project_document_text = await extract_project_document_text(project_docs)
@@ -1869,7 +1948,7 @@ Important:
         }
     )
 
-    client, model, reasoning_effort = get_llm_config(model_level)
+    client, model, reasoning_effort = get_llm_config(provider, model_level)
     response = client.chat.completions.create_structured(
         model=model,
         messages=messages,
@@ -1881,9 +1960,9 @@ Important:
     return {
         "report": report,
         "markdown": build_report_markdown(report),
-        "openai_usage": merge_openai_usage(
+        "llm_usage": merge_llm_usage(
             embedding_usage,
-            summarize_openai_usage(response.model, response.usage),
+            summarize_llm_usage(response.model, response.usage),
         ),
     }
 
@@ -1891,6 +1970,7 @@ Important:
 @app.post("/api/improve-report")
 async def improve_report(
     report: Annotated[str, Form()],
+    provider: Annotated[str, Form()] = "openai",
     model_level: Annotated[str, Form()] = "medium",
 ) -> dict[str, object]:
     try:
@@ -1918,7 +1998,7 @@ async def improve_report(
             detail="Prompt d'amelioration du rapport invalide.",
         ) from exc
 
-    client, model, reasoning_effort = get_llm_config(model_level)
+    client, model, reasoning_effort = get_llm_config(provider, model_level)
     try:
         response = client.chat.completions.create_structured(
             model=model,
@@ -1926,7 +2006,7 @@ async def improve_report(
             schema=ReportImprovement,
             reasoning_effort=reasoning_effort,
         )
-    except OpenAIError as exc:
+    except LLMProviderError as exc:
         raise HTTPException(status_code=502, detail=f"Erreur du fournisseur LLM: {exc}") from exc
     except Exception as exc:
         raise HTTPException(
@@ -1938,5 +2018,5 @@ async def improve_report(
 
     return {
         "improvement": improvement,
-        "openai_usage": summarize_openai_usage(response.model, response.usage),
+        "llm_usage": summarize_llm_usage(response.model, response.usage),
     }

@@ -39,7 +39,7 @@ CODEV peut alors faire emerger des questions comme:
 - Detection et affichage progressifs des decisions explicitement validees, distinguees selon leur origine: documentation projet, utilisateur CODEV ou persona client (commercial, developpeur, responsable produit).
 - Infobulle de tracabilite sur chaque decision avec l'extrait exact du document ou de l'echange qui justifie sa validation.
 - Sauvegarde locale et reprise depuis une liste deroulante, avec la discussion, ses decisions, son cout cumule et son dernier rapport de maturite.
-- Estimation en bas d'interface du cout OpenAI cumule pour la session et des tokens consommes.
+- Estimation en bas d'interface du cout fournisseur cumule pour la session et des tokens consommes.
 - Aide au developpeur pour preparer une reponse sans repondre a sa place.
 - Indexation optionnelle de documentation projet PDF ou Markdown pour contextualiser les questions.
 - Score de maturite du besoin sur plusieurs axes: completude, securite, performance, UX, donnees et exploitabilite.
@@ -47,8 +47,7 @@ CODEV peut alors faire emerger des questions comme:
 - Rapport de cadrage telechargeable en HTML, imprimable en PDF depuis le navigateur.
 - Analyse du rapport pour expliquer les actions qui feraient progresser le score de maturite.
 
-Le fournisseur LLM utilise est l'API OpenAI. La cle est lue cote serveur depuis
-la variable d'environnement `OPENAI_API_KEY` et n'est jamais demandee dans l'interface.
+Le fournisseur LLM est selectionne dans l'interface entre OpenAI et Ollama local. Les secrets sont lus cote serveur depuis les variables d'environnement et ne sont jamais demandes dans l'interface.
 
 La documentation projet peut etre fournie sous forme de PDF, de fichiers Markdown, ou d'un dossier wiki Markdown.
 Elle est indexee une fois dans une session documentaire locale, puis seuls les extraits utiles sont injectes dans les prompts.
@@ -77,7 +76,7 @@ Les personas sont exposes comme des skills locales chargees uniquement selon le 
 
 Le graphe de negociation reste volontairement deterministe: generation de la reponse, puis validation locale des decisions et de leurs preuves. Il n'existe aucune boucle agentique libre ni appel de sous-agent.
 
-Les sorties structurees (negociation, titre de sauvegarde, rapport de maturite et pistes d'amelioration) sont decrites par des modeles Pydantic. LangChain genere le schema attendu, demande son respect strict au fournisseur et retourne des objets deja parses. Les prompts ne contiennent donc plus de structure JSON codee en dur. La verification metier des preuves de decision reste locale et intervient apres cette validation de forme.
+Les sorties structurees (negociation, titre de sauvegarde, rapport de maturite et pistes d'amelioration) sont decrites par des modeles Pydantic. LangChain genere le schema attendu, utilise le mecanisme structure du fournisseur et retourne des objets valides deja parses. Les prompts ne contiennent donc plus de structure JSON codee en dur. La verification metier des preuves de decision reste locale et intervient apres cette validation de forme.
 
 LangSmith n'est pas requis. Le tracing distant est desactive par defaut afin que les prompts, documents et reponses ne soient pas envoyes vers un service d'observabilite tiers.
 
@@ -85,7 +84,7 @@ LangChain et LangGraph n'ajoutent aucun abonnement ni cout d'API. CODEV effectue
 
 La session documentaire utilise une recherche hybride:
 
-- embeddings `text-embedding-3-small` via OpenAI
+- embeddings `text-embedding-3-small` via OpenAI ou `nomic-embed-text` via Ollama
 - score lexical local pour conserver les correspondances exactes sur les noms d'ecrans, champs, erreurs et acronymes
 - index vectoriel Python integre, accelere automatiquement par `turbovec`
 
@@ -132,6 +131,8 @@ pip install -r requirements.txt
 
 ## Configuration
 
+### OpenAI
+
 ```powershell
 $env:OPENAI_API_KEY="votre_cle_openai"
 $env:OPENAI_LIGHT_MODEL="gpt-5-nano"
@@ -141,15 +142,40 @@ $env:OPENAI_EMBEDDING_MODEL="text-embedding-3-small"
 $env:ELEVENLABS_TTS_MODEL="eleven_multilingual_v2"
 ```
 
-Seule `OPENAI_API_KEY` est obligatoire. Si elle est definie dans les variables
-utilisateur ou systeme Windows, ouvrez un nouveau terminal avant de lancer l'application.
+Pour OpenAI, seule `OPENAI_API_KEY` est obligatoire. Si elle est definie dans les variables utilisateur ou systeme Windows, ouvrez un nouveau terminal avant de lancer l'application.
+
+### Ollama local
+
+Installer Ollama, ouvrir PowerShell, puis telecharger les modeles par defaut:
+
+```powershell
+ollama pull qwen3:4b
+ollama pull qwen3:8b
+ollama pull qwen3:14b
+ollama pull nomic-embed-text
+$env:OLLAMA_HOST="127.0.0.1:11434"
+ollama serve
+```
+
+CODEV se connecte par defaut a `http://127.0.0.1:11434`. La cle OpenAI n'est pas necessaire lorsque le fournisseur Ollama est selectionne. Les valeurs peuvent etre adaptees avant le lancement de CODEV:
+
+```powershell
+$env:OLLAMA_BASE_URL="http://127.0.0.1:11434"
+$env:OLLAMA_LIGHT_MODEL="qwen3:4b"
+$env:OLLAMA_MEDIUM_MODEL="qwen3:8b"
+$env:OLLAMA_STRONG_MODEL="qwen3:14b"
+$env:OLLAMA_EMBEDDING_MODEL="nomic-embed-text"
+```
+
+Ollama n'entraine aucun cout d'API: l'interface affiche un cout de 0 USD. Le temps de reponse et la memoire necessaire dependent du modele et de la machine.
+
 La puissance d'analyse est selectionnable dans l'interface:
 
 - `Leger`: reponses plus rapides pour les echanges simples.
 - `Moyen`: niveau par defaut pour le cadrage courant.
 - `Fort`: analyse plus approfondie pour les rapports et sujets sensibles.
 
-Les variables de modele sont optionnelles.
+Toutes les variables de modele sont optionnelles.
 
 ## Lancement
 

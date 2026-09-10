@@ -45,6 +45,14 @@
             </div>
 
             <label class="field">
+              <span>Fournisseur</span>
+              <select id="llm-provider">
+                <option value="openai" selected>OpenAI</option>
+                <option value="ollama">Ollama local</option>
+              </select>
+            </label>
+
+            <label class="field">
               <span>Puissance d'analyse</span>
               <select id="model-level">
                 <option value="light">Leger</option>
@@ -53,6 +61,8 @@
               </select>
               <span class="field-hint">Leger est plus rapide, Fort est plus approfondi.</span>
             </label>
+
+            <div id="provider-help" class="provider-help" role="status"></div>
 
           </section>
 
@@ -200,11 +210,11 @@
             </div>
           </form>
 
-          <footer class="session-cost" aria-label="Cout OpenAI de la session">
+          <footer class="session-cost" aria-label="Cout IA de la session">
             <div class="session-cost-heading">
               <span class="cost-pulse" aria-hidden="true"></span>
               <div>
-                <strong>Cout OpenAI estime</strong>
+                <strong>Cout fournisseur estime</strong>
                 <small>Session en cours</small>
               </div>
             </div>

@@ -51,7 +51,11 @@ class LangChainWorkflowTests(unittest.TestCase):
                 return {"parsed": parsed, "raw": raw, "parsing_error": None}
 
         fake_model = FakeStructuredModel()
-        owner = SimpleNamespace(api_key="test", base_url="https://api.openai.com/v1")
+        owner = SimpleNamespace(
+            provider="openai",
+            api_key="test",
+            base_url="https://api.openai.com/v1",
+        )
         adapter = app.LangChainChatCompletions(owner)
         with patch.object(app, "ChatOpenAI", return_value=fake_model):
             response = adapter.create_structured(
@@ -65,6 +69,41 @@ class LangChainWorkflowTests(unittest.TestCase):
         self.assertIs(fake_model.schema, app.SavedSessionTitle)
         self.assertEqual(fake_model.options["method"], "json_schema")
         self.assertTrue(fake_model.options["strict"])
+
+    def test_ollama_provider_does_not_require_an_openai_key(self):
+        client, model, reasoning_effort = app.get_llm_config("ollama", "light")
+
+        self.assertEqual(client.provider, "ollama")
+        self.assertEqual(model, app.OLLAMA_LIGHT_MODEL)
+        self.assertIsNone(reasoning_effort)
+        self.assertEqual(client.base_url, app.OLLAMA_BASE_URL)
+
+    def test_ollama_model_factory_uses_chat_ollama(self):
+        owner = SimpleNamespace(
+            provider="ollama",
+            api_key="",
+            base_url="http://127.0.0.1:11434",
+        )
+        adapter = app.LangChainChatCompletions(owner)
+        sentinel = object()
+        with patch.object(app, "ChatOllama", return_value=sentinel) as constructor:
+            model = adapter._build_model("qwen3:4b", None)
+
+        self.assertIs(model, sentinel)
+        constructor.assert_called_once_with(
+            model="qwen3:4b",
+            base_url="http://127.0.0.1:11434",
+            validate_model_on_init=True,
+        )
+
+    def test_ollama_usage_has_no_api_cost(self):
+        usage = app.summarize_llm_usage(
+            "ollama:qwen3:4b",
+            {"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 150},
+        )
+
+        self.assertEqual(usage["estimated_cost_usd"], 0.0)
+        self.assertTrue(usage["fully_priced"])
 
     def test_negotiation_graph_calls_model_once_and_validates_decision(self):
         completions = FakeCompletions()
