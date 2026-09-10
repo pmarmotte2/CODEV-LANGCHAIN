@@ -1,4 +1,7 @@
 import os
+os.environ.setdefault("LANGSMITH_TRACING", "false")
+os.environ.setdefault("LANGCHAIN_TRACING_V2", "false")
+
 import re
 import uuid
 import json
@@ -11,12 +14,15 @@ from pathlib import Path
 from collections import Counter
 from dataclasses import dataclass
 from types import SimpleNamespace
-from typing import Annotated
+from typing import Annotated, Any
 
 from fastapi import Body, FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
+from langchain_openai import ChatOpenAI, OpenAIEmbeddings as LangChainOpenAIEmbeddings
+from langgraph.graph import END, START, StateGraph
 from pypdf import PdfReader
+from typing_extensions import TypedDict
 
 
 OPENAI_LIGHT_MODEL = os.getenv("OPENAI_LIGHT_MODEL", "gpt-5-nano")
@@ -94,15 +100,15 @@ NEGOTIATION_RESPONSE_FORMAT = {
 CLIENT_PROFILES = {
     "sales": {
         "label": "Commercial",
-        "prompt_file": "role_commercial.txt",
+        "skill_file": "personas/commercial/SKILL.md",
     },
     "technical": {
         "label": "Developpeur",
-        "prompt_file": "role_developpeur.txt",
+        "skill_file": "personas/developpeur/SKILL.md",
     },
     "boss": {
         "label": "Responsable produit",
-        "prompt_file": "role_responsable_produit.txt",
+        "skill_file": "personas/responsable_produit/SKILL.md",
     },
 }
 TOKEN_PATTERN = re.compile(r"\w{3,}", re.UNICODE)
@@ -111,6 +117,7 @@ DOCUMENT_SESSIONS: dict[str, "DocumentSession"] = {}
 app = FastAPI(title="Assistant de CODEV")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 PROMPTS_DIR = os.path.join(os.path.dirname(__file__), "prompts")
+SKILLS_DIR = Path(__file__).resolve().parent / "skills"
 
 
 @dataclass
@@ -136,7 +143,7 @@ class OpenAIError(Exception):
     pass
 
 
-class OpenAIChatCompletions:
+class LangChainChatCompletions:
     def __init__(self, client: "OpenAIClient") -> None:
         self.client = client
 
@@ -147,55 +154,65 @@ class OpenAIChatCompletions:
         response_format: dict[str, object] | None = None,
         reasoning_effort: str | None = None,
     ) -> SimpleNamespace:
-        payload: dict[str, object] = {
+        model_options: dict[str, object] = {
             "model": model,
-            "messages": messages,
+            "api_key": self.client.api_key,
+            "base_url": self.client.base_url,
+            "timeout": 120,
+            "max_retries": 2,
         }
-        if response_format is not None:
-            payload["response_format"] = response_format
         if reasoning_effort is not None:
-            payload["reasoning_effort"] = reasoning_effort
-        data = self.client.post_json(
-            "/chat/completions",
-            payload,
-        )
-        choices = [
-            SimpleNamespace(
-                message=SimpleNamespace(content=choice.get("message", {}).get("content", ""))
-            )
-            for choice in data.get("choices", [])
-        ]
+            model_options["reasoning_effort"] = reasoning_effort
+        chat_model = ChatOpenAI(**model_options)
+        if response_format is not None:
+            chat_model = chat_model.bind(response_format=response_format)
+        try:
+            message = chat_model.invoke(messages)
+        except Exception as exc:
+            raise OpenAIError(str(exc)) from exc
+        usage_metadata = message.usage_metadata or {}
+        input_details = usage_metadata.get("input_token_details") or {}
+        usage = {
+            "prompt_tokens": int(usage_metadata.get("input_tokens") or 0),
+            "completion_tokens": int(usage_metadata.get("output_tokens") or 0),
+            "total_tokens": int(usage_metadata.get("total_tokens") or 0),
+            "prompt_tokens_details": {
+                "cached_tokens": int(input_details.get("cache_read") or 0),
+            },
+        }
         return SimpleNamespace(
-            choices=choices,
-            model=data.get("model", model),
-            usage=data.get("usage", {}),
+            choices=[SimpleNamespace(message=SimpleNamespace(content=str(message.content or "")))],
+            model=message.response_metadata.get("model_name", model),
+            usage=usage,
         )
 
 
 class OpenAIChat:
     def __init__(self, client: "OpenAIClient") -> None:
-        self.completions = OpenAIChatCompletions(client)
+        self.completions = LangChainChatCompletions(client)
 
 
-class OpenAIEmbeddings:
+class LangChainEmbeddings:
     def __init__(self, client: "OpenAIClient") -> None:
         self.client = client
 
     def create(self, model: str, input: list[str]) -> SimpleNamespace:
-        data = self.client.post_json(
-            "/embeddings",
-            {
-                "model": model,
-                "input": input,
-            },
-        )
+        try:
+            embeddings = LangChainOpenAIEmbeddings(
+                model=model,
+                api_key=self.client.api_key,
+                base_url=self.client.base_url,
+            ).embed_documents(input)
+            import tiktoken
+
+            encoding = tiktoken.get_encoding("cl100k_base")
+            prompt_tokens = sum(len(encoding.encode(text)) for text in input)
+        except Exception as exc:
+            raise OpenAIError(str(exc)) from exc
         return SimpleNamespace(
-            data=[
-                SimpleNamespace(embedding=item.get("embedding", []))
-                for item in data.get("data", [])
-            ],
-            model=data.get("model", model),
-            usage=data.get("usage", {}),
+            data=[SimpleNamespace(embedding=embedding) for embedding in embeddings],
+            model=model,
+            usage={"prompt_tokens": prompt_tokens, "total_tokens": prompt_tokens},
         )
 
 
@@ -204,29 +221,7 @@ class OpenAIClient:
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.chat = OpenAIChat(self)
-        self.embeddings = OpenAIEmbeddings(self)
-
-    def post_json(self, path: str, payload: dict[str, object]) -> dict[str, object]:
-        request = urllib.request.Request(
-            f"{self.base_url}{path}",
-            data=json.dumps(payload).encode("utf-8"),
-            headers={
-                "Authorization": f"Bearer {self.api_key}",
-                "Accept": "application/json",
-                "Content-Type": "application/json",
-            },
-            method="POST",
-        )
-        try:
-            with urllib.request.urlopen(request, timeout=120) as response:
-                return json.loads(response.read().decode("utf-8"))
-        except urllib.error.HTTPError as exc:
-            body = exc.read().decode("utf-8", errors="replace")
-            raise OpenAIError(f"HTTP {exc.code}: {body}") from exc
-        except urllib.error.URLError as exc:
-            raise OpenAIError(str(exc)) from exc
-        except json.JSONDecodeError as exc:
-            raise OpenAIError("Reponse OpenAI invalide.") from exc
+        self.embeddings = LangChainEmbeddings(self)
 
 
 class ElevenLabsError(Exception):
@@ -902,8 +897,7 @@ def retrieve_project_context(
 
 def get_client_profile(profile: str) -> dict[str, str]:
     profile_config = CLIENT_PROFILES.get(profile, CLIENT_PROFILES["sales"])
-    prompt_filename = profile_config["prompt_file"]
-    path = os.path.join(PROMPTS_DIR, prompt_filename)
+    path = SKILLS_DIR / profile_config["skill_file"]
     with open(path, encoding="utf-8") as prompt_file:
         profile_prompt = prompt_file.read().strip()
     return {
@@ -1103,6 +1097,52 @@ def validate_and_classify_decision_sources(
             candidate["evidence"] = repaired_evidence
         validated.append(candidate)
     return validated
+
+
+class NegotiationGraphState(TypedDict, total=False):
+    client: OpenAIClient
+    model: str
+    reasoning_effort: str | None
+    messages: list[dict[str, str]]
+    profile: str
+    document_text: str
+    codev_user_text: str
+    existing_decisions: list[dict[str, str]]
+    response: Any
+    reply: str
+    decisions: list[dict[str, str]]
+
+
+def generate_negotiation_response(state: NegotiationGraphState) -> dict[str, object]:
+    response = state["client"].chat.completions.create(
+        model=state["model"],
+        messages=state["messages"],
+        response_format=NEGOTIATION_RESPONSE_FORMAT,
+        reasoning_effort=state.get("reasoning_effort"),
+    )
+    content = response.choices[0].message.content or ""
+    reply, decisions = parse_negotiation_response(content, state["profile"])
+    return {"response": response, "reply": reply, "decisions": decisions}
+
+
+def validate_negotiation_decisions(state: NegotiationGraphState) -> dict[str, object]:
+    decisions = validate_and_classify_decision_sources(
+        state.get("decisions", []),
+        state.get("document_text", ""),
+        state.get("codev_user_text", ""),
+        state.get("reply", ""),
+    )
+    decisions = filter_new_validated_decisions(state.get("existing_decisions", []), decisions)
+    return {"decisions": decisions}
+
+
+_negotiation_graph_builder = StateGraph(NegotiationGraphState)
+_negotiation_graph_builder.add_node("generate", generate_negotiation_response)
+_negotiation_graph_builder.add_node("validate", validate_negotiation_decisions)
+_negotiation_graph_builder.add_edge(START, "generate")
+_negotiation_graph_builder.add_edge("generate", "validate")
+_negotiation_graph_builder.add_edge("validate", END)
+NEGOTIATION_GRAPH = _negotiation_graph_builder.compile()
 
 
 def append_validated_decisions_context(
@@ -1619,22 +1659,21 @@ async def negotiate(
         messages.append({"role": "user", "content": build_opening_prompt()})
 
     client, model, reasoning_effort = get_llm_config(model_level)
-    response = client.chat.completions.create(
-        model=model,
-        messages=messages,
-        response_format=NEGOTIATION_RESPONSE_FORMAT,
-        reasoning_effort=reasoning_effort,
-    )
-
-    content = response.choices[0].message.content or ""
-    reply, new_decisions = parse_negotiation_response(content, profile)
-    new_decisions = validate_and_classify_decision_sources(
-        new_decisions,
-        document_evidence_text,
-        "\n".join(part for part in [topic.strip(), argument.strip()] if part),
-        reply,
-    )
-    new_decisions = filter_new_validated_decisions(existing_decisions, new_decisions)
+    graph_result = NEGOTIATION_GRAPH.invoke({
+        "client": client,
+        "model": model,
+        "reasoning_effort": reasoning_effort,
+        "messages": messages,
+        "profile": profile,
+        "document_text": document_evidence_text,
+        "codev_user_text": "\n".join(
+            part for part in [topic.strip(), argument.strip()] if part
+        ),
+        "existing_decisions": existing_decisions,
+    })
+    response = graph_result["response"]
+    reply = graph_result.get("reply", "")
+    new_decisions = graph_result.get("decisions", [])
     if not reply:
         raise HTTPException(status_code=502, detail="Reponse de negociation OpenAI invalide.")
     return {

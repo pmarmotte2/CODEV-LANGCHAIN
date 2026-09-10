@@ -3,6 +3,8 @@
 Application web locale qui aide a challenger une evolution ou une correction avant developpement.
 CODEV simule un atelier de cadrage avec plusieurs profils client, detecte les zones floues du besoin, puis produit un score de maturite et un rapport de cadrage exploitable par une equipe projet.
 
+Cette branche `CODEV-LANGCHAIN` conserve l'execution locale et la cle OpenAI de l'utilisateur, tout en utilisant LangChain pour les modeles et LangGraph pour orchestrer un workflow explicite et borne.
+
 L'objectif n'est pas de remplacer le chef de projet ou le developpeur, mais de faire ressortir plus tot les ambiguites qui generent souvent des bugs, des retours client ou des changements de perimetre.
 
 ## Demonstration
@@ -62,13 +64,22 @@ La documentation projet, ses fragments et ses embeddings sont sauvegardes avec l
 Les prompts sont disponibles dans le dossier `prompts/` pour faciliter la revue ou leur modification:
 
 - `prompts/client_questions.txt`: questions posees par le profil client selectionne.
-- `prompts/role_commercial.txt`: posture du profil commercial.
-- `prompts/role_developpeur.txt`: posture du profil technique/developpeur.
-- `prompts/role_responsable_produit.txt`: posture du profil responsable produit.
 - `prompts/opening_question.txt`: consigne utilisee pour demarrer la discussion.
 - `prompts/answer_help.txt`: aide au developpeur pour preparer sa reponse.
 - `prompts/framing_report.txt`: generation du rapport et du score de maturite.
 - `prompts/report_improvement.txt`: analyse du rapport et actions pour ameliorer le score.
+
+Les personas sont exposes comme des skills locales chargees uniquement selon le profil selectionne:
+
+- `skills/personas/commercial/SKILL.md`
+- `skills/personas/developpeur/SKILL.md`
+- `skills/personas/responsable_produit/SKILL.md`
+
+Le graphe de negociation reste volontairement deterministe: generation de la reponse, puis validation locale des decisions et de leurs preuves. Il n'existe aucune boucle agentique libre ni appel de sous-agent.
+
+LangSmith n'est pas requis. Le tracing distant est desactive par defaut afin que les prompts, documents et reponses ne soient pas envoyes vers un service d'observabilite tiers.
+
+LangChain et LangGraph n'ajoutent aucun abonnement ni cout d'API. CODEV effectue le meme appel de generation par echange et conserve le suivi de cout existant; la validation, le routage du graphe et le chargement des skills s'executent localement. Leur impact machine se limite principalement aux dependances Python et a une faible surcharge en memoire.
 
 La session documentaire utilise une recherche hybride:
 
