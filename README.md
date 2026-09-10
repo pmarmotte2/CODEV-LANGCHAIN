@@ -77,6 +77,8 @@ Les personas sont exposes comme des skills locales chargees uniquement selon le 
 
 Le graphe de negociation reste volontairement deterministe: generation de la reponse, puis validation locale des decisions et de leurs preuves. Il n'existe aucune boucle agentique libre ni appel de sous-agent.
 
+Les sorties structurees (negociation, titre de sauvegarde, rapport de maturite et pistes d'amelioration) sont decrites par des modeles Pydantic. LangChain genere le schema attendu, demande son respect strict au fournisseur et retourne des objets deja parses. Les prompts ne contiennent donc plus de structure JSON codee en dur. La verification metier des preuves de decision reste locale et intervient apres cette validation de forme.
+
 LangSmith n'est pas requis. Le tracing distant est desactive par defaut afin que les prompts, documents et reponses ne soient pas envoyes vers un service d'observabilite tiers.
 
 LangChain et LangGraph n'ajoutent aucun abonnement ni cout d'API. CODEV effectue le meme appel de generation par echange et conserve le suivi de cout existant; la validation, le routage du graphe et le chargement des skills s'executent localement. Leur impact machine se limite principalement aux dependances Python et a une faible surcharge en memoire.

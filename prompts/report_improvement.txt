@@ -11,21 +11,4 @@ Objectif:
 - Distinguer les gains rapides des sujets structurants.
 - Rester en francais, pragmatique et actionnable.
 
-Retourne uniquement un objet JSON valide avec cette structure:
-{{
-  "target_score": 0,
-  "summary": "...",
-  "priority_actions": [
-    {{
-      "axis": "...",
-      "current_score": 0,
-      "target_score": 0,
-      "action": "...",
-      "expected_impact": "..."
-    }}
-  ],
-  "questions_to_answer": ["..."],
-  "quick_wins": ["..."],
-  "definition_of_ready": ["..."]
-}}
-Le target_score est une estimation realiste du score atteignable si les actions sont realisees.
+Renseigne la reponse structuree imposee par l'application. Le target_score est une estimation realiste du score atteignable si les actions sont realisees.

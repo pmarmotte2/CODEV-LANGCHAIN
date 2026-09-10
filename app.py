@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, Response
 from fastapi.staticfiles import StaticFiles
 from langchain_openai import ChatOpenAI, OpenAIEmbeddings as LangChainOpenAIEmbeddings
 from langgraph.graph import END, START, StateGraph
+from pydantic import BaseModel, Field
 from pypdf import PdfReader
 from typing_extensions import TypedDict
 
@@ -55,48 +56,62 @@ OPENAI_PRICING_USD_PER_MILLION = {
     "gpt-4.1": {"input": 2.00, "cached_input": 0.50, "output": 8.00},
     "text-embedding-3-small": {"input": 0.02, "cached_input": 0.02, "output": 0.0},
 }
-NEGOTIATION_RESPONSE_FORMAT = {
-    "type": "json_schema",
-    "json_schema": {
-        "name": "negotiation_turn",
-        "strict": True,
-        "schema": {
-            "type": "object",
-            "properties": {
-                "reply": {"type": "string"},
-                "project_decisions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
-                        "required": ["text", "evidence"],
-                        "additionalProperties": False,
-                    },
-                },
-                "client_decisions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
-                        "required": ["text", "evidence"],
-                        "additionalProperties": False,
-                    },
-                },
-                "codev_user_decisions": {
-                    "type": "array",
-                    "items": {
-                        "type": "object",
-                        "properties": {"text": {"type": "string"}, "evidence": {"type": "string"}},
-                        "required": ["text", "evidence"],
-                        "additionalProperties": False,
-                    },
-                },
-            },
-            "required": ["reply", "project_decisions", "client_decisions", "codev_user_decisions"],
-            "additionalProperties": False,
-        },
-    },
-}
+
+
+class DecisionOutput(BaseModel):
+    text: str = Field(description="Decision validee, formulee comme une contrainte projet.")
+    evidence: str = Field(description="Extrait exact qui confirme cette decision.")
+
+
+class NegotiationOutput(BaseModel):
+    reply: str = Field(description="Reponse du persona au developpeur.")
+    project_decisions: list[DecisionOutput] = Field(
+        description="Decisions explicitement confirmees par la documentation projet."
+    )
+    client_decisions: list[DecisionOutput] = Field(
+        description="Decisions explicitement confirmees dans la reponse du persona."
+    )
+    codev_user_decisions: list[DecisionOutput] = Field(
+        description="Decisions explicitement confirmees par l'utilisateur CODEV."
+    )
+
+
+class SavedSessionTitle(BaseModel):
+    title: str = Field(description="Titre metier distinctif de 3 a 5 mots.")
+
+
+class MaturityScore(BaseModel):
+    name: str
+    score: int = Field(ge=0, le=100)
+    reason: str
+
+
+class FramingReport(BaseModel):
+    global_score: int = Field(ge=0, le=100)
+    scores: list[MaturityScore]
+    executive_summary: str
+    critical_points: list[str]
+    clarified_points: list[str]
+    residual_risks: list[str]
+    acceptance_criteria: list[str]
+    next_actions: list[str]
+
+
+class PriorityAction(BaseModel):
+    axis: str
+    current_score: int = Field(ge=0, le=100)
+    target_score: int = Field(ge=0, le=100)
+    action: str
+    expected_impact: str
+
+
+class ReportImprovement(BaseModel):
+    target_score: int = Field(ge=0, le=100)
+    summary: str
+    priority_actions: list[PriorityAction]
+    questions_to_answer: list[str]
+    quick_wins: list[str]
+    definition_of_ready: list[str]
 CLIENT_PROFILES = {
     "sales": {
         "label": "Commercial",
@@ -147,13 +162,7 @@ class LangChainChatCompletions:
     def __init__(self, client: "OpenAIClient") -> None:
         self.client = client
 
-    def create(
-        self,
-        model: str,
-        messages: list[dict[str, str]],
-        response_format: dict[str, object] | None = None,
-        reasoning_effort: str | None = None,
-    ) -> SimpleNamespace:
+    def _build_model(self, model: str, reasoning_effort: str | None) -> ChatOpenAI:
         model_options: dict[str, object] = {
             "model": model,
             "api_key": self.client.api_key,
@@ -163,13 +172,10 @@ class LangChainChatCompletions:
         }
         if reasoning_effort is not None:
             model_options["reasoning_effort"] = reasoning_effort
-        chat_model = ChatOpenAI(**model_options)
-        if response_format is not None:
-            chat_model = chat_model.bind(response_format=response_format)
-        try:
-            message = chat_model.invoke(messages)
-        except Exception as exc:
-            raise OpenAIError(str(exc)) from exc
+        return ChatOpenAI(**model_options)
+
+    @staticmethod
+    def _legacy_response(message: Any, model: str) -> SimpleNamespace:
         usage_metadata = message.usage_metadata or {}
         input_details = usage_metadata.get("input_token_details") or {}
         usage = {
@@ -185,6 +191,49 @@ class LangChainChatCompletions:
             model=message.response_metadata.get("model_name", model),
             usage=usage,
         )
+
+    def create(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        response_format: dict[str, object] | None = None,
+        reasoning_effort: str | None = None,
+    ) -> SimpleNamespace:
+        chat_model = self._build_model(model, reasoning_effort)
+        if response_format is not None:
+            chat_model = chat_model.bind(response_format=response_format)
+        try:
+            message = chat_model.invoke(messages)
+        except Exception as exc:
+            raise OpenAIError(str(exc)) from exc
+        return self._legacy_response(message, model)
+
+    def create_structured(
+        self,
+        model: str,
+        messages: list[dict[str, str]],
+        schema: type[BaseModel],
+        reasoning_effort: str | None = None,
+    ) -> SimpleNamespace:
+        structured_model = self._build_model(model, reasoning_effort).with_structured_output(
+            schema,
+            method="json_schema",
+            strict=True,
+            include_raw=True,
+        )
+        try:
+            result = structured_model.invoke(messages)
+        except Exception as exc:
+            raise OpenAIError(str(exc)) from exc
+        parsing_error = result.get("parsing_error")
+        parsed = result.get("parsed")
+        raw = result.get("raw")
+        if parsing_error is not None or parsed is None or raw is None:
+            detail = str(parsing_error or "reponse structuree absente")
+            raise OpenAIError(f"Reponse OpenAI structuree invalide: {detail}")
+        response = self._legacy_response(raw, model)
+        response.parsed = parsed
+        return response
 
 
 class OpenAIChat:
@@ -532,7 +581,7 @@ def sanitize_saved_session_label(label: str, fallback_topic: str) -> str:
 
 def generate_saved_session_label(topic: str) -> tuple[str, dict[str, object]]:
     client = get_openai_client()
-    response = client.chat.completions.create(
+    response = client.chat.completions.create_structured(
         model=OPENAI_LIGHT_MODEL,
         messages=[
             {
@@ -546,25 +595,9 @@ def generate_saved_session_label(topic: str) -> tuple[str, dict[str, object]]:
             },
             {"role": "user", "content": topic},
         ],
-        response_format={
-            "type": "json_schema",
-            "json_schema": {
-                "name": "saved_session_title",
-                "strict": True,
-                "schema": {
-                    "type": "object",
-                    "properties": {"title": {"type": "string"}},
-                    "required": ["title"],
-                    "additionalProperties": False,
-                },
-            },
-        },
+        schema=SavedSessionTitle,
     )
-    try:
-        content = response.choices[0].message.content or "{}"
-        raw_label = str(json.loads(content).get("title") or "")
-    except (IndexError, AttributeError, json.JSONDecodeError) as exc:
-        raise OpenAIError("Titre de sauvegarde OpenAI invalide.") from exc
+    raw_label = response.parsed.title
     return (
         sanitize_saved_session_label(raw_label, topic),
         summarize_openai_usage(response.model, response.usage),
@@ -950,40 +983,6 @@ def parse_validated_decisions(raw_decisions: str) -> list[dict[str, str]]:
     return decisions[:100]
 
 
-def parse_negotiation_response(content: str, profile: str) -> tuple[str, list[dict[str, str]]]:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        return content.strip(), []
-
-    if not isinstance(parsed, dict):
-        return content.strip(), []
-
-    reply = str(parsed.get("reply") or "").strip()
-    decisions = []
-    for field, source in [
-        ("project_decisions", "document"),
-        ("client_decisions", "client"),
-        ("codev_user_decisions", "codev_user"),
-    ]:
-        raw_decisions = parsed.get(field)
-        if not isinstance(raw_decisions, list):
-            continue
-        for decision in raw_decisions:
-            if not isinstance(decision, dict):
-                continue
-            text = re.sub(r"\s+", " ", str(decision.get("text") or "")).strip()
-            evidence = re.sub(r"\s+", " ", str(decision.get("evidence") or "")).strip()
-            if text:
-                decisions.append({
-                    "text": text,
-                    "evidence": evidence[:500],
-                    "source": source,
-                    "profile": profile,
-                })
-    return reply, decisions[:12]
-
-
 def normalize_decision_comparison_text(value: str) -> str:
     normalized = unicodedata.normalize("NFKD", value).encode("ascii", "ignore").decode("ascii")
     return re.sub(r"[^a-z0-9]+", " ", normalized.lower()).strip()
@@ -1114,14 +1113,30 @@ class NegotiationGraphState(TypedDict, total=False):
 
 
 def generate_negotiation_response(state: NegotiationGraphState) -> dict[str, object]:
-    response = state["client"].chat.completions.create(
+    response = state["client"].chat.completions.create_structured(
         model=state["model"],
         messages=state["messages"],
-        response_format=NEGOTIATION_RESPONSE_FORMAT,
+        schema=NegotiationOutput,
         reasoning_effort=state.get("reasoning_effort"),
     )
-    content = response.choices[0].message.content or ""
-    reply, decisions = parse_negotiation_response(content, state["profile"])
+    parsed: NegotiationOutput = response.parsed
+    decisions = []
+    for raw_decisions, source in [
+        (parsed.project_decisions, "document"),
+        (parsed.client_decisions, "client"),
+        (parsed.codev_user_decisions, "codev_user"),
+    ]:
+        for decision in raw_decisions:
+            text = re.sub(r"\s+", " ", decision.text).strip()
+            evidence = re.sub(r"\s+", " ", decision.evidence).strip()
+            if text:
+                decisions.append({
+                    "text": text,
+                    "evidence": evidence[:500],
+                    "source": source,
+                    "profile": state["profile"],
+                })
+    reply = parsed.reply.strip()
     return {"response": response, "reply": reply, "decisions": decisions}
 
 
@@ -1252,21 +1267,7 @@ def build_report_improvement_prompt(report: dict[str, object]) -> str:
     )
 
 
-def parse_report_response(content: str) -> dict[str, object]:
-    try:
-        parsed = json.loads(content)
-    except json.JSONDecodeError:
-        match = re.search(r"\{.*\}", content, re.DOTALL)
-        if not match:
-            raise HTTPException(status_code=502, detail="Rapport IA invalide.")
-        try:
-            parsed = json.loads(match.group(0))
-        except json.JSONDecodeError as exc:
-            raise HTTPException(status_code=502, detail="Rapport IA invalide.") from exc
-
-    if not isinstance(parsed, dict):
-        raise HTTPException(status_code=502, detail="Rapport IA invalide.")
-
+def normalize_report(parsed: dict[str, object]) -> dict[str, object]:
     scores = parsed.get("scores")
     if isinstance(scores, list):
         normalized_scores = []
@@ -1855,7 +1856,7 @@ async def framing_report(
         {
             "role": "user",
             "content": """
-Genere le rapport de cadrage et le score de maturite au format JSON demande.
+Genere le rapport de cadrage et le score de maturite selon la structure imposee par l'application.
 Important:
 - Analyse la discussion complete dans l'ordre chronologique.
 - Les reponses du developpeur et les validations du client doivent etre prises en compte comme des clarifications.
@@ -1869,14 +1870,14 @@ Important:
     )
 
     client, model, reasoning_effort = get_llm_config(model_level)
-    response = client.chat.completions.create(
+    response = client.chat.completions.create_structured(
         model=model,
         messages=messages,
+        schema=FramingReport,
         reasoning_effort=reasoning_effort,
     )
 
-    content = response.choices[0].message.content or ""
-    report = parse_report_response(content.strip())
+    report = normalize_report(response.parsed.model_dump())
     return {
         "report": report,
         "markdown": build_report_markdown(report),
@@ -1919,9 +1920,10 @@ async def improve_report(
 
     client, model, reasoning_effort = get_llm_config(model_level)
     try:
-        response = client.chat.completions.create(
+        response = client.chat.completions.create_structured(
             model=model,
             messages=messages,
+            schema=ReportImprovement,
             reasoning_effort=reasoning_effort,
         )
     except OpenAIError as exc:
@@ -1932,11 +1934,7 @@ async def improve_report(
             detail="Erreur inattendue pendant l'analyse du rapport.",
         ) from exc
 
-    content = response.choices[0].message.content or ""
-    try:
-        improvement = parse_report_response(content.strip())
-    except HTTPException:
-        improvement = build_fallback_improvement(parsed_report)
+    improvement = response.parsed.model_dump()
 
     return {
         "improvement": improvement,

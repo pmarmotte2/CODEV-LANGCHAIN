@@ -1,7 +1,7 @@
-import json
 import os
 import unittest
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import app
 
@@ -10,25 +10,62 @@ class FakeCompletions:
     def __init__(self) -> None:
         self.calls = []
 
-    def create(self, **kwargs):
+    def create_structured(self, **kwargs):
         self.calls.append(kwargs)
-        content = json.dumps({
-            "reply": "Je confirme que l'export est limite aux contrats rouges.",
-            "project_decisions": [],
-            "client_decisions": [{
-                "text": "L'export est limite aux contrats rouges.",
-                "evidence": "Je confirme que l'export est limite aux contrats rouges.",
-            }],
-            "codev_user_decisions": [],
-        })
         return SimpleNamespace(
-            choices=[SimpleNamespace(message=SimpleNamespace(content=content)),],
+            parsed=app.NegotiationOutput(
+                reply="Je confirme que l'export est limite aux contrats rouges.",
+                project_decisions=[],
+                client_decisions=[app.DecisionOutput(
+                    text="L'export est limite aux contrats rouges.",
+                    evidence="Je confirme que l'export est limite aux contrats rouges.",
+                )],
+                codev_user_decisions=[],
+            ),
             model="gpt-5-nano",
             usage={"prompt_tokens": 10, "completion_tokens": 10, "total_tokens": 20},
         )
 
 
 class LangChainWorkflowTests(unittest.TestCase):
+    def test_langchain_adapter_uses_native_structured_output(self):
+        parsed = app.SavedSessionTitle(title="Export contrats rouges")
+
+        class FakeStructuredModel:
+            def with_structured_output(self, schema, **kwargs):
+                self.schema = schema
+                self.options = kwargs
+                return self
+
+            def invoke(self, messages):
+                self.messages = messages
+                raw = SimpleNamespace(
+                    content="",
+                    usage_metadata={
+                        "input_tokens": 4,
+                        "output_tokens": 2,
+                        "total_tokens": 6,
+                    },
+                    response_metadata={"model_name": "gpt-5-nano"},
+                )
+                return {"parsed": parsed, "raw": raw, "parsing_error": None}
+
+        fake_model = FakeStructuredModel()
+        owner = SimpleNamespace(api_key="test", base_url="https://api.openai.com/v1")
+        adapter = app.LangChainChatCompletions(owner)
+        with patch.object(app, "ChatOpenAI", return_value=fake_model):
+            response = adapter.create_structured(
+                model="gpt-5-nano",
+                messages=[{"role": "user", "content": "Test"}],
+                schema=app.SavedSessionTitle,
+            )
+
+        self.assertIs(response.parsed, parsed)
+        self.assertEqual(response.usage["total_tokens"], 6)
+        self.assertIs(fake_model.schema, app.SavedSessionTitle)
+        self.assertEqual(fake_model.options["method"], "json_schema")
+        self.assertTrue(fake_model.options["strict"])
+
     def test_negotiation_graph_calls_model_once_and_validates_decision(self):
         completions = FakeCompletions()
         client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
@@ -73,6 +110,42 @@ class LangChainWorkflowTests(unittest.TestCase):
     def test_remote_langchain_tracing_is_disabled_by_default(self):
         self.assertEqual(os.environ["LANGSMITH_TRACING"], "false")
         self.assertEqual(os.environ["LANGCHAIN_TRACING_V2"], "false")
+
+    def test_negotiation_schema_rejects_an_incomplete_decision(self):
+        with self.assertRaises(ValueError):
+            app.NegotiationOutput.model_validate({
+                "reply": "Decision confirmee.",
+                "project_decisions": [],
+                "client_decisions": [{"text": "Il manque la preuve."}],
+                "codev_user_decisions": [],
+            })
+
+    def test_report_schema_and_local_global_score_calculation(self):
+        report = app.FramingReport(
+            global_score=99,
+            scores=[
+                app.MaturityScore(name="Completude", score=40, reason="Partiel"),
+                app.MaturityScore(name="Securite", score=10, reason="Non discute"),
+                app.MaturityScore(name="Performance", score=20, reason="Mentionne"),
+                app.MaturityScore(name="UX", score=30, reason="Partiel"),
+            ],
+            executive_summary="Synthese",
+            critical_points=[],
+            clarified_points=[],
+            residual_risks=[],
+            acceptance_criteria=[],
+            next_actions=[],
+        )
+
+        normalized = app.normalize_report(report.model_dump())
+
+        self.assertEqual(normalized["global_score"], 20)
+
+    def test_all_llm_structured_outputs_are_pydantic_models(self):
+        self.assertTrue(issubclass(app.SavedSessionTitle, app.BaseModel))
+        self.assertTrue(issubclass(app.NegotiationOutput, app.BaseModel))
+        self.assertTrue(issubclass(app.FramingReport, app.BaseModel))
+        self.assertTrue(issubclass(app.ReportImprovement, app.BaseModel))
 
 
 if __name__ == "__main__":

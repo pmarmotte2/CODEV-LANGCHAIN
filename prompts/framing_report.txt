@@ -30,22 +30,5 @@ Bareme obligatoire pour chaque axe:
 - 86 a 100: axe complet, coherent et testable, incluant cas limites et criteres d'acceptation.
 Le nombre d'echanges ne fait pas monter le score en lui-meme. Un axe ne peut depasser 50 sans plusieurs decisions explicites qui lui sont propres. Un axe peut etre juge sans impact seulement si cette absence d'impact a ete explicitement analysee et justifiee; "non discute" ne signifie jamais "non applicable".
 
-Retourne uniquement un objet JSON valide avec cette structure:
-{{
-  "global_score": 0,
-  "scores": [
-    {{"name": "Completude", "score": 0, "reason": "..."}},
-    {{"name": "Securite", "score": 0, "reason": "..."}},
-    {{"name": "Performance", "score": 0, "reason": "..."}},
-    {{"name": "UX", "score": 0, "reason": "..."}},
-    {{"name": "Donnees", "score": 0, "reason": "..."}},
-    {{"name": "Exploitabilite", "score": 0, "reason": "..."}}
-  ],
-  "executive_summary": "...",
-  "critical_points": ["..."],
-  "clarified_points": ["..."],
-  "residual_risks": ["..."],
-  "acceptance_criteria": ["..."],
-  "next_actions": ["..."]
-}}
-Les scores sont des entiers de 0 a 100. Le score global est calcule par l'application a partir des trois axes les plus faibles: concentre-toi sur la justesse des scores par axe.
+Renseigne les six axes Completude, Securite, Performance, UX, Donnees et Exploitabilite dans la reponse structuree imposee par l'application.
+Les scores sont des entiers de 0 a 100. Le score global est recalcule par l'application a partir des trois axes les plus faibles: concentre-toi sur la justesse des scores par axe.

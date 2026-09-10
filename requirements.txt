@@ -2,6 +2,7 @@ fastapi==0.115.6
 uvicorn[standard]==0.34.0
 pypdf==5.1.0
 python-multipart==0.0.20
+pydantic>=2.7,<3.0
 langchain==1.4.0
 langchain-openai==1.6.2
 langgraph==1.2.11
